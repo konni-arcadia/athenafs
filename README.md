@@ -21,8 +21,8 @@ SMB like any other share. Built for collections of hundreds of torrents: tested 
   `docs/measurements.md`.
 
 ## Requirements
-A Linux host with Docker (Compose v2), FUSE (`/dev/fuse`), `sudo` for the host mount point, and `findmnt`. The core
-container runs with `SYS_ADMIN` and AppArmor unconfined, which FUSE needs: run it on a machine you trust.
+A Linux host with Docker (Compose v2), FUSE (`/dev/fuse`) and `findmnt`; `sudo` only on hosts whose `/` is not a shared
+mount (systemd hosts have it shared). The core container needs extra privileges for FUSE: read Security first.
 
 ## Quick start
 ```sh
@@ -98,6 +98,44 @@ for Windows.
 Archives (zip, 7z, rar) are shown as ordinary files by default. Distribyted can show them as folders, but opening each one
 downloads its headers (4 to 10 MB measured), so browsing hundreds of them would download gigabytes. For a big archive, copy
 it first, then extract it locally. A solid 7z read through the share needs a cache cap larger than the archive.
+
+## Security
+Read this before exposing anything beyond the machine itself.
+
+**What is exposed, and the defaults**
+- The page and the API listen on `127.0.0.1` and the share on `127.0.0.1` by default: nothing is reachable from the network
+  until `ATHENAFS_BIND` or `SMB_BIND` says so.
+- Exposing the page without `ATHENAFS_PASSWORD` lets anyone on that network add torrents (your connection then downloads
+  and uploads what they chose, under your IP address), erase the cache and change the settings. The password is sent with
+  basic authentication over plain HTTP: use it on a network you trust, or put the page behind an HTTPS reverse proxy.
+- The share is read-only, with the test account `tor` / `rent` unless `SMB_USER` and `SMB_PASS` are set.
+- `scripts/up.sh` prints a warning, and the page and `/api/status` show it, when the page is exposed without a password or
+  the share with the test account.
+
+**Privileges**
+- The core container needs FUSE: `/dev/fuse`, the `SYS_ADMIN` capability and AppArmor unconfined (Docker's default
+  profile forbids mounting), plus `DAC_OVERRIDE` to write in `DATA` (owned by your user). Every other capability is dropped
+  and `no-new-privileges` is set. It is still the part to watch: it talks to the internet (peers, trackers, URLs given to
+  the page) with more rights than a normal container, so a flaw in Distribyted or its BitTorrent library would be easier
+  to turn into an escape.
+- The Samba container keeps `CHOWN`, `SETUID` and `SETGID` (to create its account and switch to it), nothing else, and
+  `no-new-privileges`. It only sees the mount, read-only.
+- `sudo` is only needed on hosts whose `/` is not a shared mount (systemd hosts have it shared): `up.sh` then makes `DATA/mount`
+  a shared bind mount of itself, and `down.sh` releases it.
+- Run it on a machine you trust, not on a host shared with untrusted users or services.
+
+**Guards in place**
+- POST requests must come from the page (matching `Origin`) or carry `X-Athenafs: 1`: other web sites cannot act through
+  your browser (anti-CSRF).
+- A URL given to the page is fetched only if it is http(s) and every address it resolves to (and every redirect) is
+  public, at most 10 MB, and parsed as a torrent before anything is kept.
+- Torrent and file names are escaped on the page; folder names are sanitised (`A-Z a-z 0-9 . _ -`); a file path from a
+  torrent that would leave the share (`..`) is never read.
+
+**What is yours to decide**
+- BitTorrent shows your IP address to every peer of the torrents that are awake (being read, or woken for a health
+  check). What you add, and whether you route it through a VPN, is your responsibility.
+- Upload is not capped while a torrent is awake.
 
 ## Performance
 With 637 torrents (259 TB, 12.5 million pieces): every torrent in its folder 10 s after a start, the core at about 10 % of

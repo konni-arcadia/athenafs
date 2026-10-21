@@ -1055,6 +1055,7 @@ def render(s=None):
     if not srows:
         srows = "<tr><td colspan=4 class=mut>No torrent yet: add one above.</td></tr>"
     msg = f"<div class=msg>{html.escape(s['message'])}</div>" if s["message"] else ""
+    msg += "".join(f"<div class=\"msg warn\">Security: {html.escape(w)}</div>" for w in WARNINGS)
     capmb = s["capacity"] or 0
     cap = f"of a {mb(capmb * 1e6)} limit" if capmb else ""
     pct = min(100, round(s["total_cache"] / (capmb * 1e6) * 100, 1)) if capmb else 0
@@ -1109,6 +1110,8 @@ def render(s=None):
 # ---------------------------------------------------------------- API (JSON): status, torrents, files, usage, erase
 
 SMB_SHARE = os.environ.get("ATHENAFS_SMB_SHARE", "torrents")
+# risky exposures found by scripts/up.sh (it reads .env; the share's password never reaches this container), one per line
+WARNINGS = [w for w in os.environ.get("ATHENAFS_WARNINGS", "").split("|") if w.strip()]
 
 
 def smb_host():
@@ -1147,7 +1150,7 @@ def api_status():
             "transfer": {"down": a["down"], "up": a["up"]},
             "prefetch": {"queued": a["prefetch"]["queued"], "active": len(a["prefetch"]["active"]),
                          "done": a["prefetch"]["done"], "failed": len(a["prefetch"]["failed"])},
-            "smb": locations("", True)}
+            "smb": locations("", True), "warnings": WARNINGS}
 
 
 def torrent_rows(folder="", hash_=""):
@@ -1759,7 +1762,9 @@ def prefetch_worker():
         if not path:
             time.sleep(1); continue
         ok, err = False, ""
-        for attempt in range(3):   # a read can time out (no peer yet) or fail during a restart
+        if path.startswith("/") or ".." in path.split("/"):   # a torrent can name its files anything: stay in the mount
+            err, job["cancel"] = "refused: path leaves the share", True
+        for attempt in range(0 if job["cancel"] else 3):   # a read can time out (no peer yet) or fail during a restart
             try:
                 with open(os.path.join(MOUNT, path), "rb", buffering=0) as f:
                     f.seek(job["read"])
@@ -1777,7 +1782,7 @@ def prefetch_worker():
             prefetch["bytes"] += job["read"]
             if ok:
                 prefetch["done"] += 1
-            elif not job["cancel"]:
+            elif not job["cancel"] or err:
                 prefetch["failed"] = (prefetch["failed"] + [{"path": path, "error": err}])[-20:]
 
 

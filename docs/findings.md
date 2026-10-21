@@ -259,6 +259,23 @@ pieces, 443,000 files, 258 TB).
 - **Confirmations:** `confirm()` pop-ups were blocked silently in an embedded browser, so "Cache all" did nothing; every
   confirmation is now a second click on the same button, and the 5 s refresh waits while one is armed.
 
+## Security hardening (2026-10-21)
+
+- **Capabilities measured, not guessed.** Both containers start from `cap_drop: [ALL]` with `no-new-privileges`. Core:
+  `SYS_ADMIN` (FUSE mount) and `DAC_OVERRIDE` (without it: `Permission denied` writing `/data`, which belongs to the host
+  user); a read waking a dormant torrent, an erase and a clean stop all worked with that. Samba, removing one capability at
+  a time from a generous set: without `CHOWN` or `SETGID` the container exits (account creation), without `SETUID` reads
+  fail; `DAC_OVERRIDE`, `FOWNER` and `NET_BIND_SERVICE` were not needed (Docker lets port 445 be opened inside the
+  container). Kept: `CHOWN`, `SETUID`, `SETGID`. A wrong password is still refused.
+- **sudo:** the self bind mount of `DATA/mount` is only needed where `/` is not shared; this host (systemd) has it shared,
+  and `up.sh` now starts without sudo. The dead-FUSE-mount cleanup moved to the core (it unmounts at start and that
+  propagates to the host).
+- **Warnings:** `up.sh` detects the page exposed without a password and the share exposed with `tor` / `rent`, prints
+  them and passes them to the page and `/api/status`.
+- **Path guard:** a torrent can name a file `../x`; the prefetch reader refuses a path that leaves the share.
+- AppArmor stays unconfined for the core: a profile allowing only the FUSE mount would need loading on the host (root),
+  which is not "easy to avoid". WebDAV (built into Distribyted) would remove FUSE and its privileges altogether; not done.
+
 ## Cache cap and disk space (2026-10-21)
 
 The cap on the cache (`global_cache_size`, in MB, in `core/config.yaml`) is now shown against the disk and can be changed from the

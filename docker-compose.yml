@@ -11,8 +11,9 @@ services:
     stop_grace_period: 60s   # Distribyted needs more than Docker's default 10 s to stop with hundreds of torrents; killed
                              # before, it leaves a dead FUSE mount behind (Transport endpoint is not connected)
     devices: ["/dev/fuse:/dev/fuse"]
-    cap_add: [SYS_ADMIN]
-    security_opt: ["apparmor:unconfined"]
+    cap_drop: [ALL]
+    cap_add: [SYS_ADMIN, DAC_OVERRIDE]
+    security_opt: ["apparmor:unconfined", "no-new-privileges:true"]
     environment:
       DISTRIBYTED_CONFIG: /config/config.yaml
       DISTRIBYTED_METAINFO_DIR: /data/metainfo
@@ -22,6 +23,7 @@ services:
       DISTRIBYTED_HEALTH_ORDER: /data/health-order.txt
       DISTRIBYTED_ROOT_FILES: /data/share-root      # files shown at the root of the share (links to the page)
       ATHENAFS_COMMIT: "${ATHENAFS_COMMIT:-unknown}"   # set by scripts/up.sh, checked by scripts/measure.sh
+      ATHENAFS_WARNINGS: "${ATHENAFS_WARNINGS:-}"   # set by scripts/up.sh: risky exposures, shown on the page
       ATHENAFS_PASSWORD: "${ATHENAFS_PASSWORD:-}"   # page and API password (user "admin"); empty = none
       ATHENAFS_SMB_HOST: "${ATHENAFS_SMB_HOST:-}"   # host name in the smb:// and \\host\share locations of the API
       ATHENAFS_SMB_SHARE: "${SMB_SHARE:-torrents}"
@@ -43,6 +45,9 @@ services:
     build: ./smb
     container_name: athenafs-smb
     restart: "no"
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETUID, SETGID]   # smbpasswd/useradd, then smbd switching to the account (measured: nothing else)
+    security_opt: ["no-new-privileges:true"]
     depends_on: [core]
     ports: ["${SMB_BIND:-127.0.0.1}:${SMB_PORT:-445}:445"]
     environment:
