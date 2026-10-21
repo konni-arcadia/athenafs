@@ -44,6 +44,13 @@ RUN git apply /tmp/parallel_load.patch
 # waiting in the background and is added to its folder when the info arrives (no restart). Applies after the patch above.
 COPY patches/late_metadata.patch /tmp/late_metadata.patch
 RUN git apply /tmp/late_metadata.patch
+# Local patch: dormant torrents. With $DISTRIBYTED_DORMANT_AFTER > 0 (seconds), a torrent given as a .torrent file is served
+# from its metadata only (folders list without the BitTorrent client) and added to the client when one of its files is
+# opened; it leaves the client again once no file of it has been open for that long. Every torrent in the client cost
+# memory and CPU (one lock per piece, a DHT announcer, a scraper per tracker): 636 torrents, 12.5 million pieces, 14 GB.
+# Dormant torrents do not seed. 0 = the old behaviour. Applies after the patches above.
+COPY patches/dormant_torrents.patch /tmp/dormant_torrents.patch
+RUN git apply /tmp/dormant_torrents.patch
 # Local patch: files of $DISTRIBYTED_ROOT_FILES are served at the root of the mount (admin.py puts links to its page there).
 COPY patches/root_files.go /src/fs/root_files.go
 RUN sed -i 's|\treturn &ContainerFs{s: s}, nil|\taddRootFiles(s)\n\treturn \&ContainerFs{s: s}, nil|' fs/container.go \

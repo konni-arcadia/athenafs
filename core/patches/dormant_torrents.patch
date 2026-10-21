@@ -1,0 +1,450 @@
+diff --git a/fs/lazy.go b/fs/lazy.go
+new file mode 100644
+index 0000000..281bb25
+--- /dev/null
++++ b/fs/lazy.go
+@@ -0,0 +1,104 @@
++package fs
++
++import (
++	"strings"
++	"sync"
++	"time"
++
++	"github.com/anacrolix/torrent"
++	"github.com/anacrolix/torrent/metainfo"
++)
++
++// Lazy is a torrent served from its metadata alone: its files are listed without the BitTorrent client, and the torrent
++// is added to the client ("woken") only when one of its files is opened. Sleep takes it out again once no file has been
++// open for a while. Hundreds of torrents then cost only what the few being read cost (peers, announces, memory).
++type Lazy struct {
++	Hash  string
++	Info  *metainfo.Info
++	Route string
++
++	wake  func(*Lazy) (*torrent.Torrent, error)
++	drop  func(*Lazy, *torrent.Torrent)
++	mu    sync.Mutex
++	t     *torrent.Torrent
++	open  int
++	since time.Time // last open or close
++}
++
++func NewLazy(hash, route string, info *metainfo.Info, wake func(*Lazy) (*torrent.Torrent, error),
++	drop func(*Lazy, *torrent.Torrent)) *Lazy {
++	return &Lazy{Hash: hash, Route: route, Info: info, wake: wake, drop: drop}
++}
++
++// lazyFile is one file of the torrent, as anacrolix's Torrent.Files() would list it (same order, same paths).
++type lazyFile struct {
++	path, displayPath string
++	length            int64
++	index             int
++}
++
++func (l *Lazy) files() []lazyFile {
++	var out []lazyFile
++	for i, fi := range l.Info.UpvertedFiles() {
++		out = append(out, lazyFile{
++			path:        strings.Join(append([]string{l.Info.BestName()}, fi.BestPath()...), "/"),
++			displayPath: fi.DisplayPath(l.Info),
++			length:      fi.Length,
++			index:       i,
++		})
++	}
++	return out
++}
++
++// reader wakes the torrent if needed and opens file i of it.
++func (l *Lazy) reader(i int) (torrent.Reader, error) {
++	l.mu.Lock()
++	defer l.mu.Unlock()
++	if l.t == nil {
++		t, err := l.wake(l)
++		if err != nil {
++			return nil, err
++		}
++		l.t = t
++	}
++	l.open++
++	l.since = time.Now()
++	return &lazyReader{Reader: l.t.Files()[i].NewReader(), l: l}, nil
++}
++
++// SleepIfIdle takes the torrent out of the client when it is awake, no file of it is open, and the last open or close
++// was more than idle ago. Returns true when it went to sleep.
++func (l *Lazy) SleepIfIdle(idle time.Duration) bool {
++	l.mu.Lock()
++	defer l.mu.Unlock()
++	if l.t == nil || l.open > 0 || time.Since(l.since) < idle {
++		return false
++	}
++	l.drop(l, l.t)
++	l.t = nil
++	return true
++}
++
++// Awake reports whether the torrent is in the client now.
++func (l *Lazy) Awake() bool {
++	l.mu.Lock()
++	defer l.mu.Unlock()
++	return l.t != nil
++}
++
++type lazyReader struct {
++	torrent.Reader
++	l    *Lazy
++	once sync.Once
++}
++
++func (r *lazyReader) Close() error {
++	err := r.Reader.Close()
++	r.once.Do(func() {
++		r.l.mu.Lock()
++		r.l.open--
++		r.l.since = time.Now()
++		r.l.mu.Unlock()
++	})
++	return err
++}
+diff --git a/fs/torrent.go b/fs/torrent.go
+index f5af665..84507be 100644
+--- a/fs/torrent.go
++++ b/fs/torrent.go
+@@ -16,6 +16,7 @@ var _ Filesystem = &Torrent{}
+ type Torrent struct {
+ 	mu          sync.RWMutex
+ 	ts          map[string]*torrent.Torrent
++	lazy        map[string]*Lazy // torrents served from their metadata, woken on open (see lazy.go)
+ 	s           *storage
+ 	loaded      bool
+ 	readTimeout int
+@@ -25,6 +26,7 @@ func NewTorrent(readTimeout int) *Torrent {
+ 	t := &Torrent{
+ 		s:           newStorage(SupportedFactories),
+ 		ts:          make(map[string]*torrent.Torrent),
++		lazy:        make(map[string]*Lazy),
+ 		readTimeout: readTimeout,
+ 	}
+ 	// a folder whose torrents are still being added (in the background) must exist, empty, not be "no such file"
+@@ -39,6 +41,13 @@ func (fs *Torrent) AddTorrent(t *torrent.Torrent) {
+ 	fs.ts[t.InfoHash().HexString()] = t
+ }
+ 
++func (fs *Torrent) AddLazy(l *Lazy) {
++	fs.mu.Lock()
++	defer fs.mu.Unlock()
++	fs.loaded = false
++	fs.lazy[l.Hash] = l
++}
++
+ func (fs *Torrent) RemoveTorrent(h string) {
+ 	fs.mu.Lock()
+ 	defer fs.mu.Unlock()
+@@ -48,6 +57,7 @@ func (fs *Torrent) RemoveTorrent(h string) {
+ 	fs.loaded = false
+ 
+ 	delete(fs.ts, h)
++	delete(fs.lazy, h)
+ }
+ 
+ func (fs *Torrent) load() {
+@@ -74,6 +84,13 @@ func (fs *Torrent) load() {
+ 			roots[t.Info().BestName()] = true
+ 		}
+ 	}
++	for _, l := range fs.lazy {
++		if len(l.Info.Files) == 0 {
++			roots[""] = true
++		} else {
++			roots[l.Info.BestName()] = true
++		}
++	}
+ 	flatten := len(roots) == 1 && !roots[""]
+ 
+ 	for _, t := range fs.ts {
+@@ -82,13 +99,28 @@ func (fs *Torrent) load() {
+ 			if flatten {
+ 				p = file.DisplayPath()
+ 			}
++			file := file
+ 			fs.s.Add(&torrentFile{
+-				readerFunc: file.NewReader,
++				readerFunc: func() (torrent.Reader, error) { return file.NewReader(), nil },
+ 				len:        file.Length(),
+ 				timeout:    fs.readTimeout,
+ 			}, p)
+ 		}
+ 	}
++	for _, l := range fs.lazy {
++		for _, f := range l.files() {
++			p := f.path
++			if flatten {
++				p = f.displayPath
++			}
++			l, i := l, f.index
++			fs.s.Add(&torrentFile{
++				readerFunc: func() (torrent.Reader, error) { return l.reader(i) },
++				len:        f.length,
++				timeout:    fs.readTimeout,
++			}, p)
++		}
++	}
+ 
+ 	fs.loaded = true
+ }
+@@ -173,17 +205,22 @@ func (rw *readAtWrapper) Close() error {
+ var _ File = &torrentFile{}
+ 
+ type torrentFile struct {
+-	readerFunc func() torrent.Reader
++	readerFunc func() (torrent.Reader, error)
+ 	reader     reader
+ 	len        int64
+ 	timeout    int
+ }
+ 
+-func (d *torrentFile) load() {
++func (d *torrentFile) load() error {
+ 	if d.reader != nil {
+-		return
++		return nil
+ 	}
+-	d.reader = newReadAtWrapper(d.readerFunc(), d.timeout)
++	r, err := d.readerFunc()
++	if err != nil {
++		return err
++	}
++	d.reader = newReadAtWrapper(r, d.timeout)
++	return nil
+ }
+ 
+ func (d *torrentFile) Size() int64 {
+@@ -206,7 +243,9 @@ func (d *torrentFile) Close() error {
+ }
+ 
+ func (d *torrentFile) Read(p []byte) (n int, err error) {
+-	d.load()
++	if err := d.load(); err != nil {
++		return 0, err
++	}
+ 	ctx, cancel := context.WithCancel(context.Background())
+ 	timer := time.AfterFunc(
+ 		time.Duration(d.timeout)*time.Second,
+@@ -221,6 +260,8 @@ func (d *torrentFile) Read(p []byte) (n int, err error) {
+ }
+ 
+ func (d *torrentFile) ReadAt(p []byte, off int64) (n int, err error) {
+-	d.load()
++	if err := d.load(); err != nil {
++		return 0, err
++	}
+ 	return d.reader.ReadAt(p, off)
+ }
+diff --git a/fs/torrent_test.go b/fs/torrent_test.go
+index 9ac3f7e..b5e7668 100644
+--- a/fs/torrent_test.go
++++ b/fs/torrent_test.go
+@@ -94,7 +94,7 @@ func TestReadAtTorrent(t *testing.T) {
+ 	torrFile := to.Files()[0]
+ 
+ 	tf := torrentFile{
+-		readerFunc: torrFile.NewReader,
++		readerFunc: func() (torrent.Reader, error) { return torrFile.NewReader(), nil },
+ 		len:        torrFile.Length(),
+ 		timeout:    500,
+ 	}
+diff --git a/torrent/service.go b/torrent/service.go
+index 6d27b86..f528604 100644
+--- a/torrent/service.go
++++ b/torrent/service.go
+@@ -3,7 +3,9 @@ package torrent
+ import (
+ 	"errors"
+ 	"fmt"
++	"os"
+ 	"path"
++	"strconv"
+ 	"sync"
+ 	"time"
+ 
+@@ -30,11 +32,22 @@ type Service struct {
+ 	log                     zerolog.Logger
+ 	addTimeout, readTimeout int
+ 	continueWhenAddTimeout  bool
++
++	// dormantAfter > 0: torrents of .torrent files are served from their metadata and only added to the client while a
++	// file of theirs is open, plus this delay ($DISTRIBYTED_DORMANT_AFTER, seconds; 0 = every torrent always in the client)
++	dormantAfter time.Duration
++	lazyMu       sync.Mutex
++	lazies       []*fs.Lazy
+ }
+ 
+ func NewService(loaders []loader.Loader, db loader.LoaderAdder, stats *Stats, c *torrent.Client, addTimeout, readTimeout int, continueWhenAddTimeout bool) *Service {
+ 	l := log.Logger.With().Str("component", "torrent-service").Logger()
+-	return &Service{
++	var dormantAfter time.Duration
++	if n, err := strconv.Atoi(os.Getenv("DISTRIBYTED_DORMANT_AFTER")); err == nil && n > 0 {
++		dormantAfter = time.Duration(n) * time.Second
++	}
++	s := &Service{
++		dormantAfter:           dormantAfter,
+ 		log:                    l,
+ 		s:                      stats,
+ 		c:                      c,
+@@ -45,6 +58,66 @@ func NewService(loaders []loader.Loader, db loader.LoaderAdder, stats *Stats, c
+ 		readTimeout:            readTimeout,
+ 		continueWhenAddTimeout: continueWhenAddTimeout,
+ 	}
++	if dormantAfter > 0 {
++		go s.sleepIdle()
++	}
++	return s
++}
++
++// sleepIdle puts back to sleep the woken torrents that have had no open file for dormantAfter.
++func (s *Service) sleepIdle() {
++	for range time.Tick(30 * time.Second) {
++		s.lazyMu.Lock()
++		ls := append([]*fs.Lazy(nil), s.lazies...)
++		s.lazyMu.Unlock()
++		for _, l := range ls {
++			if l.SleepIfIdle(s.dormantAfter) {
++				s.log.Info().Str("hash", l.Hash).Str("route", l.Route).Msg("torrent asleep (idle)")
++			}
++		}
++	}
++}
++
++func (s *Service) addLazy(r, p string) error {
++	mi, err := metainfo.LoadFromFile(p)
++	if err != nil {
++		return err
++	}
++	info, err := mi.UnmarshalInfo()
++	if err != nil {
++		return err
++	}
++	h := mi.HashInfoBytes().HexString()
++	wake := func(l *fs.Lazy) (*torrent.Torrent, error) {
++		t, err := s.c.AddTorrent(mi)
++		if err != nil {
++			return nil, err
++		}
++		s.s.ClearDormant(r, h)
++		s.s.Add(r, t)
++		s.log.Info().Str("hash", h).Str("route", r).Msg("torrent woken (a file was opened)")
++		return t, nil
++	}
++	sleep := func(l *fs.Lazy, t *torrent.Torrent) {
++		s.s.Del(r, h)
++		t.Drop()
++		s.s.SetDormant(r, h, info.BestName(), info.NumPieces(), info.PieceLength)
++	}
++	l := fs.NewLazy(h, r, &info, wake, sleep)
++
++	s.mu.Lock()
++	tfs, ok := s.fss[path.Join("/", r)].(*fs.Torrent)
++	s.mu.Unlock()
++	if !ok {
++		return errors.New("error adding torrent to filesystem")
++	}
++	s.s.SetDormant(r, h, info.BestName(), info.NumPieces(), info.PieceLength)
++	tfs.AddLazy(l)
++	s.lazyMu.Lock()
++	s.lazies = append(s.lazies, l)
++	s.lazyMu.Unlock()
++	s.log.Info().Str("name", info.BestName()).Str("route", r).Msg("torrent added (dormant)")
++	return nil
+ }
+ 
+ func (s *Service) Load() (map[string]fs.Filesystem, error) {
+@@ -126,6 +199,9 @@ func (s *Service) AddMagnet(r, m string) error {
+ }
+ 
+ func (s *Service) addTorrentPath(r, p string) error {
++	if s.dormantAfter > 0 {
++		return s.addLazy(r, p)
++	}
+ 	// Add to client
+ 	t, err := s.c.AddTorrentFromFile(p)
+ 	if err != nil {
+diff --git a/torrent/stats.go b/torrent/stats.go
+index 5ea8a3b..9f2420a 100644
+--- a/torrent/stats.go
++++ b/torrent/stats.go
+@@ -40,6 +40,8 @@ type TorrentStats struct {
+ 	// Cumulative since the torrent was added (the fields above are deltas between calls).
+ 	TotalDownloadedBytes int64 `json:"totalDownloadedBytes"`
+ 	TotalUploadedBytes   int64 `json:"totalUploadedBytes"`
++	// Dormant: served from its metadata, not in the client until one of its files is opened (no peers, no transfer).
++	Dormant bool `json:"dormant"`
+ }
+ 
+ type byName []*TorrentStats
+@@ -80,6 +82,7 @@ type Stats struct {
+ 	torrents        map[string]*torrent.Torrent
+ 	torrentsByRoute map[string]map[string]*torrent.Torrent
+ 	previousStats   map[string]*stat
++	dormant         map[string]map[string]*TorrentStats // route -> info-hash -> fixed stats of a dormant torrent
+ 
+ 	gTime time.Time
+ }
+@@ -90,6 +93,7 @@ func NewStats() *Stats {
+ 		torrents:        make(map[string]*torrent.Torrent),
+ 		torrentsByRoute: make(map[string]map[string]*torrent.Torrent),
+ 		previousStats:   make(map[string]*stat),
++		dormant:         make(map[string]map[string]*TorrentStats),
+ 	}
+ }
+ 
+@@ -144,6 +148,22 @@ func (s *Stats) Stats(hash string) (*TorrentStats, error) {
+ 	return s.stats(now, t, true), nil
+ }
+ 
++// SetDormant lists a dormant torrent in its route; ClearDormant removes it (when it is woken).
++func (s *Stats) SetDormant(route, hash, name string, pieces int, pieceSize int64) {
++	s.mut.Lock()
++	defer s.mut.Unlock()
++	if s.dormant[route] == nil {
++		s.dormant[route] = make(map[string]*TorrentStats)
++	}
++	s.dormant[route][hash] = &TorrentStats{Name: name, Hash: hash, TotalPieces: pieces, PieceSize: pieceSize, Dormant: true}
++}
++
++func (s *Stats) ClearDormant(route, hash string) {
++	s.mut.Lock()
++	defer s.mut.Unlock()
++	delete(s.dormant[route], hash)
++}
++
+ func (s *Stats) RoutesStats() []*RouteStats {
+ 	s.mut.Lock()
+ 	defer s.mut.Unlock()
+@@ -151,12 +171,24 @@ func (s *Stats) RoutesStats() []*RouteStats {
+ 	now := time.Now()
+ 
+ 	var out []*RouteStats
+-	for r, tl := range s.torrentsByRoute {
++	routes := map[string]bool{}
++	for r := range s.torrentsByRoute {
++		routes[r] = true
++	}
++	for r := range s.dormant {
++		routes[r] = true
++	}
++	for r := range routes {
++		tl := s.torrentsByRoute[r]
+ 		var tStats []*TorrentStats
+ 		for _, t := range tl {
+ 			ts := s.stats(now, t, true)
+ 			tStats = append(tStats, ts)
+ 		}
++		for _, d := range s.dormant[r] {
++			c := *d
++			tStats = append(tStats, &c)
++		}
+ 
+ 		sort.Sort(byName(tStats))
+ 

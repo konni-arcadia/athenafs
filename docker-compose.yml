@@ -16,6 +16,7 @@ services:
     environment:
       DISTRIBYTED_CONFIG: /config/config.yaml
       DISTRIBYTED_METAINFO_DIR: /data/metainfo
+      DISTRIBYTED_DORMANT_AFTER: "${ATHENAFS_DORMANT_AFTER:-600}"   # s without an open file before a torrent sleeps; 0 = never
       DISTRIBYTED_ROOT_FILES: /data/share-root      # files shown at the root of the share (links to the page)
       ATHENAFS_COMMIT: "${ATHENAFS_COMMIT:-unknown}"   # set by scripts/up.sh, checked by scripts/measure.sh
       ATHENAFS_PAGE_URL: "${ATHENAFS_PAGE_URL:-}"   # address of this page as seen from the network (set by scripts/up.sh)

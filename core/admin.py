@@ -707,6 +707,7 @@ def snapshot():
         else:
             status = "not mounted"
         srcs.append({"id": s["id"], "route": s["route"], "kind": s["kind"], "hash": h, "status": status,
+                     "awake": h in live and not live[h][1].get("dormant"),
                      "size": tp[h]["total"] if h in tp else 0,
                      "name": tp[h]["name"] if h in tp else (magnet_dn(s["value"]) if s["kind"] == "magnet" else "")})
     st = api("/status") or {}
@@ -795,7 +796,7 @@ a{{color:var(--acc)}}a.seg{{color:inherit;text-decoration:none;border-bottom:1px
 <div class=tile><span>Cache</span><b>{cache}</b><span>{cap}</span><div class=bar><i style="width:{cachepct}%"></i></div></div>
 <div class=tile><span>Disk free</span><b>{dfree}</b><span>of {dtotal}</span></div>
 <div class=tile><span>Download</span><b>{down}</b><span>upload {up} · received since start {rx}</span></div>
-<div class=tile><span>Torrents</span><b>{ntor}</b><span>in {nfold} folders</span></div>
+<div class=tile><span>Torrents</span><b>{ntor}</b><span>in {nfold} folders · {nawake} awake</span></div>
 </div>
 <section class=card><h2>Activity</h2>{act}</section>
 <section class=card><h2>Folders</h2><div class=wrap><table>
@@ -920,6 +921,8 @@ def render(s=None):
         for x in xs:
             counts[x["status"]] = counts.get(x["status"], 0) + 1
         status = ", ".join(f"{n} {st}" if len(xs) > 1 else st for st, n in counts.items())
+        awake = sum(1 for x in xs if x.get("awake"))
+        status += f" · {awake} awake" if len(xs) > 1 else (" · awake" if awake else " · dormant")
         names = sorted({x["name"] or (x["hash"] or "")[:12] for x in xs})
         label = html.escape(names[0]) + (f" <span class=mut>+{len(xs) - 1}</span>" if len(xs) > 1 else "")
         inner = ""
@@ -985,7 +988,8 @@ def render(s=None):
     return PAGE.format(capform=capform, act=act, down=rate(a["down"]), up=rate(a["up"]), dfree=mb(s["disk_free"]), dtotal=mb(s["disk_total"]), dmax=mb(s["max_cap_mb"] * 1e6),
                        state=html.escape(s["state"]), pillcls="ok" if s["state"] == "running" else "busy",
                        cache=mb(s["total_cache"]), cap=cap, cachepct=pct, msg=msg, rows=rows, sources=srows, unknown=unk,
-                       dis=dis, rx=mb(s["network_rx"]), tx=mb(s["network_tx"]), ntor=len(s["sources"]), nfold=len(folders))
+                       dis=dis, rx=mb(s["network_rx"]), tx=mb(s["network_tx"]), ntor=len(s["sources"]), nfold=len(folders),
+                       nawake=sum(1 for x in s["sources"] if x.get("awake")))
 
 
 class H(http.server.BaseHTTPRequestHandler):
