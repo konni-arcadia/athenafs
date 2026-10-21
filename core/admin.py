@@ -733,6 +733,8 @@ def rate(n):
 
 
 def mb(n):
+    if n >= 1e12:
+        return f"{n / 1e12:.2f} TB"
     return f"{n / 1e6:,.0f} MB".replace(",", " ") if n < 1e9 else f"{n / 1e9:.2f} GB"
 
 
@@ -816,7 +818,7 @@ It does not delete the .torrent files of the setup or the configuration.</p></di
 </div>
 <script>
 const esc=s=>s.replace(/[&<>"']/g,c=>({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[c]));
-const sz=n=>n<1e6?(n/1e3).toFixed(0)+' kB':n<1e9?(n/1e6).toFixed(0)+' MB':(n/1e9).toFixed(2)+' GB';
+const sz=n=>n<1e6?(n/1e3).toFixed(0)+' kB':n<1e9?(n/1e6).toFixed(0)+' MB':n<1e12?(n/1e9).toFixed(2)+' GB':(n/1e12).toFixed(2)+' TB';
 const post=async(u,d)=>(await fetch(u,{{method:'POST',headers:{{'Content-Type':'application/x-www-form-urlencoded'}},body:new URLSearchParams(d)}})).json();
 const badge={{'cached':'ok','partial':'','not cached':'mut','queued':'busy','caching':'busy','downloading':'busy'}};
 let sq='',so=0,st;
@@ -963,10 +965,13 @@ def render(s=None):
     if pf["active"] or pf["queued"]:
         act += (f"<div style=\"margin-top:10px\"><b class=small>Adding to the cache</b> <span class=\"mut small\">{pf['queued']} queued "
                 f"({mb(pf['queued_size'])}) · {pf['done']} done</span> <button id=pfcancel class=danger>Cancel all</button></div><div class=wrap><table>")
+        peers = {x["hash"]: x["peers"] for x in activity["torrents"]}
         for j in pf["active"]:
             pct = min(100, round(j["read"] * 100 / j["size"])) if j["size"] else 0
+            n = peers.get(j.get("hash"), 0)
+            how = (f"waiting for peers ({n} connected)" if not j["read"] else f"{n} peer{'s' if n != 1 else ''}")
             act += (f"<tr><td class=small>{html.escape(j['path'])}<div class=bar><i style=\"width:{pct}%\"></i></div></td>"
-                    f"<td class=\"n small\">{mb(j['read'])} / {mb(j['size'])}</td></tr>")
+                    f"<td class=\"n small\">{mb(j['read'])} / {mb(j['size'])}<br><span class=mut>{how} · {round(time.time() - j['since'])} s</span></td></tr>")
         act += "</table></div>"
     if pf["failed"]:
         act += "".join(f"<div class=\"mut small\">could not cache {html.escape(f['path'])}: {html.escape(f['error'])}</div>" for f in pf["failed"][-3:])
@@ -1317,7 +1322,7 @@ def search(q, limit=50, offset=0):
 
 PREFETCH_WORKERS = 2
 plock = threading.Lock()
-prefetch = {"queue": collections.deque(), "queued": {}, "active": {}, "done": 0, "failed": [], "bytes": 0}
+prefetch = {"queue": collections.deque(), "queued": {}, "hash": {}, "active": {}, "done": 0, "failed": [], "bytes": 0}
 
 
 def prefetch_add(q="", paths=()):
@@ -1329,26 +1334,26 @@ def prefetch_add(q="", paths=()):
             base, args = query_sql(q)
             if not base:
                 return {"error": "empty query"}
-            rows = c.execute(f"SELECT files.path, files.size {base} LIMIT {SEARCH_CAP}", args).fetchall()
+            rows = c.execute(f"SELECT files.path, files.size, files.hash {base} LIMIT {SEARCH_CAP}", args).fetchall()
         else:
-            rows = [r for p in paths for r in c.execute("SELECT path, size FROM files WHERE path = ?", (p,)).fetchall()]
+            rows = [r for p in paths for r in c.execute("SELECT path, size, hash FROM files WHERE path = ?", (p,)).fetchall()]
     finally:
         c.close()
     capmb = effective_cap_mb(load_settings())
     with plock:
-        new = [(p, n) for p, n in rows if p not in prefetch["queued"] and p not in prefetch["active"]]
-        size = sum(n for _, n in new)
+        new = [(p, n, h) for p, n, h in rows if p not in prefetch["queued"] and p not in prefetch["active"]]
+        size = sum(n for _, n, _ in new)
         if size + sum(prefetch["queued"].values()) > capmb * 1e6 * 0.9:
             return {"error": f"{mb(size)} is more than the cache can hold ({mb(capmb * 1e6)}): nothing queued", "size": size}
-        for p, n in new:
-            prefetch["queue"].append(p); prefetch["queued"][p] = n
+        for p, n, h in new:
+            prefetch["queue"].append(p); prefetch["queued"][p] = n; prefetch["hash"][p] = h
     return {"queued": len(new), "size": size, "already": len(rows) - len(new)}
 
 
 def prefetch_cancel():
     with plock:
         n = len(prefetch["queue"])
-        prefetch["queue"].clear(); prefetch["queued"].clear()
+        prefetch["queue"].clear(); prefetch["queued"].clear(); prefetch["hash"].clear()
         for a in prefetch["active"].values():
             a["cancel"] = True
     return {"cancelled": n}
@@ -1360,7 +1365,8 @@ def prefetch_worker():
             path = prefetch["queue"].popleft() if prefetch["queue"] and state["state"] == "running" else None
             if path:
                 size = prefetch["queued"].pop(path, 0)
-                job = prefetch["active"][path] = {"path": path, "size": size, "read": 0, "cancel": False}
+                job = prefetch["active"][path] = {"path": path, "size": size, "read": 0, "cancel": False,
+                                                  "hash": prefetch["hash"].pop(path, ""), "since": time.time()}
         if not path:
             time.sleep(1); continue
         ok, err = False, ""
