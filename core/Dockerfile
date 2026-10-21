@@ -51,6 +51,12 @@ RUN git apply /tmp/late_metadata.patch
 # Dormant torrents do not seed. 0 = the old behaviour. Applies after the patches above.
 COPY patches/dormant_torrents.patch /tmp/dormant_torrents.patch
 RUN git apply /tmp/dormant_torrents.patch
+# Local patch: health check. Dormant torrents are woken in turn ($DISTRIBYTED_HEALTH_PARALLEL at a time, for
+# $DISTRIBYTED_HEALTH_PROBE s, no file open so nothing is downloaded) and the most peers and seeders seen are reported in
+# /api/routes ("health"). Order from $DISTRIBYTED_HEALTH_ORDER (written by admin.py: never or least recently checked first).
+# A torrent that wants no data seldom connects to peers: the peers known (announced on the DHT and trackers) are the signal.
+COPY patches/health_check.patch /tmp/health_check.patch
+RUN git apply /tmp/health_check.patch
 # Local patch: files of $DISTRIBYTED_ROOT_FILES are served at the root of the mount (admin.py puts links to its page there).
 COPY patches/root_files.go /src/fs/root_files.go
 RUN sed -i 's|\treturn &ContainerFs{s: s}, nil|\taddRootFiles(s)\n\treturn \&ContainerFs{s: s}, nil|' fs/container.go \

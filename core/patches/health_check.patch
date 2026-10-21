@@ -1,0 +1,190 @@
+diff --git a/fs/lazy.go b/fs/lazy.go
+index 281bb25..72c94d1 100644
+--- a/fs/lazy.go
++++ b/fs/lazy.go
+@@ -102,3 +102,36 @@ func (r *lazyReader) Close() error {
+ 	})
+ 	return err
+ }
++
++// Probe wakes the torrent for d without opening any file (nothing is downloaded: no file asks for data), calling sample
++// every few seconds, then puts it back to sleep at once if it was dormant before and no file was opened meanwhile.
++func (l *Lazy) Probe(d time.Duration, sample func(*torrent.Torrent)) error {
++	l.mu.Lock()
++	wasAsleep := l.t == nil
++	if wasAsleep {
++		t, err := l.wake(l)
++		if err != nil {
++			l.mu.Unlock()
++			return err
++		}
++		l.t = t
++	}
++	l.open++ // holds it awake
++	t := l.t
++	l.mu.Unlock()
++
++	end := time.Now().Add(d)
++	for time.Now().Before(end) {
++		time.Sleep(5 * time.Second)
++		sample(t)
++	}
++
++	l.mu.Lock()
++	defer l.mu.Unlock()
++	l.open--
++	if wasAsleep && l.open == 0 && l.t != nil {
++		l.drop(l, l.t)
++		l.t = nil
++	}
++	return nil
++}
+diff --git a/torrent/service.go b/torrent/service.go
+index f528604..3584bcb 100644
+--- a/torrent/service.go
++++ b/torrent/service.go
+@@ -5,7 +5,9 @@ import (
+ 	"fmt"
+ 	"os"
+ 	"path"
++	"sort"
+ 	"strconv"
++	"strings"
+ 	"sync"
+ 	"time"
+ 
+@@ -60,10 +62,71 @@ func NewService(loaders []loader.Loader, db loader.LoaderAdder, stats *Stats, c
+ 	}
+ 	if dormantAfter > 0 {
+ 		go s.sleepIdle()
++		go s.healthChecks()
+ 	}
+ 	return s
+ }
+ 
++// healthChecks wakes the dormant torrents in turn, a few at a time, for $DISTRIBYTED_HEALTH_PROBE seconds each (0 = off),
++// and records the most peers and seeders seen. Order: the info-hashes listed in $DISTRIBYTED_HEALTH_ORDER (one per
++// line, the supervisor puts the never or least recently checked first), then the others; then again, round after round.
++func (s *Service) healthChecks() {
++	probe, _ := strconv.Atoi(os.Getenv("DISTRIBYTED_HEALTH_PROBE"))
++	parallel, _ := strconv.Atoi(os.Getenv("DISTRIBYTED_HEALTH_PARALLEL"))
++	if probe <= 0 {
++		return
++	}
++	if parallel <= 0 {
++		parallel = 1
++	}
++	time.Sleep(2 * time.Minute) // let the start-up settle
++	sem := make(chan struct{}, parallel)
++	for {
++		order := map[string]int{}
++		if b, err := os.ReadFile(os.Getenv("DISTRIBYTED_HEALTH_ORDER")); err == nil {
++			for i, h := range strings.Fields(string(b)) {
++				order[h] = i + 1
++			}
++		}
++		s.lazyMu.Lock()
++		ls := append([]*fs.Lazy(nil), s.lazies...)
++		s.lazyMu.Unlock()
++		rank := func(l *fs.Lazy) int {
++			if r, ok := order[l.Hash]; ok {
++				return r
++			}
++			return len(order) + 1
++		}
++		sort.SliceStable(ls, func(i, j int) bool { return rank(ls[i]) < rank(ls[j]) })
++		var wg sync.WaitGroup
++		for _, l := range ls {
++			if l.Awake() { // being read: its stats are live anyway
++				continue
++			}
++			sem <- struct{}{}
++			wg.Add(1)
++			go func(l *fs.Lazy) {
++				defer func() { <-sem; wg.Done() }()
++				h := &Health{}
++				err := l.Probe(time.Duration(probe)*time.Second, func(t *torrent.Torrent) {
++					st := t.Stats()
++					h.Known = max(h.Known, st.TotalPeers)
++					h.Connected = max(h.Connected, st.ActivePeers)
++					h.Seeders = max(h.Seeders, st.ConnectedSeeders)
++				})
++				if err != nil {
++					s.log.Warn().Err(err).Str("hash", l.Hash).Msg("health check failed")
++					return
++				}
++				h.Checked = time.Now().Unix()
++				s.s.SetHealth(l.Hash, h)
++			}(l)
++		}
++		wg.Wait()
++		s.log.Info().Int("torrents", len(ls)).Msg("health check round done")
++	}
++}
++
+ // sleepIdle puts back to sleep the woken torrents that have had no open file for dormantAfter.
+ func (s *Service) sleepIdle() {
+ 	for range time.Tick(30 * time.Second) {
+diff --git a/torrent/stats.go b/torrent/stats.go
+index 9f2420a..4dcbc23 100644
+--- a/torrent/stats.go
++++ b/torrent/stats.go
+@@ -42,6 +42,16 @@ type TorrentStats struct {
+ 	TotalUploadedBytes   int64 `json:"totalUploadedBytes"`
+ 	// Dormant: served from its metadata, not in the client until one of its files is opened (no peers, no transfer).
+ 	Dormant bool `json:"dormant"`
++	// Health: result of the last health check of this torrent since Distribyted started (nil: not checked yet).
++	Health *Health `json:"health,omitempty"`
++}
++
++// Health: the most peers seen while a torrent was woken for a health check (no file open, nothing downloaded).
++type Health struct {
++	Known     int   `json:"known"`     // peers known (from DHT, trackers, PEX)
++	Connected int   `json:"connected"` // peers connected
++	Seeders   int   `json:"seeders"`   // connected peers that have every piece
++	Checked   int64 `json:"checked"`   // unix time of the end of the check
+ }
+ 
+ type byName []*TorrentStats
+@@ -83,6 +93,7 @@ type Stats struct {
+ 	torrentsByRoute map[string]map[string]*torrent.Torrent
+ 	previousStats   map[string]*stat
+ 	dormant         map[string]map[string]*TorrentStats // route -> info-hash -> fixed stats of a dormant torrent
++	health          map[string]*Health                  // info-hash -> last health check
+ 
+ 	gTime time.Time
+ }
+@@ -94,6 +105,7 @@ func NewStats() *Stats {
+ 		torrentsByRoute: make(map[string]map[string]*torrent.Torrent),
+ 		previousStats:   make(map[string]*stat),
+ 		dormant:         make(map[string]map[string]*TorrentStats),
++		health:          make(map[string]*Health),
+ 	}
+ }
+ 
+@@ -158,6 +170,12 @@ func (s *Stats) SetDormant(route, hash, name string, pieces int, pieceSize int64
+ 	s.dormant[route][hash] = &TorrentStats{Name: name, Hash: hash, TotalPieces: pieces, PieceSize: pieceSize, Dormant: true}
+ }
+ 
++func (s *Stats) SetHealth(hash string, h *Health) {
++	s.mut.Lock()
++	defer s.mut.Unlock()
++	s.health[hash] = h
++}
++
+ func (s *Stats) ClearDormant(route, hash string) {
+ 	s.mut.Lock()
+ 	defer s.mut.Unlock()
+@@ -183,10 +201,12 @@ func (s *Stats) RoutesStats() []*RouteStats {
+ 		var tStats []*TorrentStats
+ 		for _, t := range tl {
+ 			ts := s.stats(now, t, true)
++			ts.Health = s.health[ts.Hash]
+ 			tStats = append(tStats, ts)
+ 		}
+ 		for _, d := range s.dormant[r] {
+ 			c := *d
++			c.Health = s.health[c.Hash]
+ 			tStats = append(tStats, &c)
+ 		}
+ 

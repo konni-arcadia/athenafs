@@ -367,7 +367,56 @@ def api(path, timeout=3):
 
 
 ROOT_FILES = os.environ.get("DISTRIBYTED_ROOT_FILES", "/data/share-root")
-PAGE_URL = os.environ.get("ATHENAFS_PAGE_URL", "")
+HEALTH_ORDER = os.environ.get("DISTRIBYTED_HEALTH_ORDER", "/data/health-order.txt")
+health = {}   # info-hash -> {"known", "connected", "seeders", "checked"}: last health check, kept in the index database
+
+
+def load_health():
+    try:
+        c = db()
+        c.execute("CREATE TABLE IF NOT EXISTS health(hash TEXT PRIMARY KEY, known INTEGER, connected INTEGER, seeders INTEGER, checked INTEGER)")
+        for h, k, n, sd, ch in c.execute("SELECT hash, known, connected, seeders, checked FROM health"):
+            health[h] = {"known": k, "connected": n, "seeders": sd, "checked": ch}
+        c.close()
+    except sqlite3.Error as e:
+        print("health table:", e)
+
+
+def save_health(updates):
+    c = db()
+    with c:
+        c.executemany("INSERT OR REPLACE INTO health VALUES (?,?,?,?,?)",
+                      [(h, x["known"], x["connected"], x["seeders"], x["checked"]) for h, x in updates.items()])
+    c.close()
+
+
+def write_health_order():
+    """Order of the next health checks for Distribyted: never checked first, then the least recently checked."""
+    hashes = {source_hash(s) for s in load_sources()} - {None}
+    order = sorted(hashes, key=lambda h: health.get(h, {}).get("checked", 0))
+    with open(HEALTH_ORDER + ".tmp", "w") as f:
+        f.write("\n".join(order) + "\n")
+    os.replace(HEALTH_ORDER + ".tmp", HEALTH_ORDER)
+
+
+def health_text(h):
+    """Short text for the page. A dormant torrent woken for its check asks for no data, so the client rarely connects to
+    peers: the peers announced (DHT, trackers) are the main signal, connected seeders a bonus."""
+    x = health.get(h)
+    if not x:
+        return "not checked yet"
+    ago = time.time() - x["checked"]
+    when = f"{ago / 3600:.0f} h ago" if ago >= 3600 else f"{ago / 60:.0f} min ago"
+    if x["seeders"]:
+        return f"{x['seeders']} seeder{'s' if x['seeders'] > 1 else ''} connected, {x['known']} peers announced, {when}"
+    if x["known"]:
+        return f"{x['known']} peer{'s' if x['known'] > 1 else ''} announced, {when}"
+    return f"no peer found, {when}"
+
+
+def looks_dead(h):
+    x = health.get(h)
+    return bool(x) and not x["known"] and not x["connected"]
 
 
 def write_root_files():
@@ -389,6 +438,10 @@ def write_root_files():
 def start():
     unmount_fuse()   # a stale mount from a killed run would hide the new one
     write_root_files()
+    try:
+        write_health_order()
+    except OSError as e:
+        print("health order:", e)
     generate_config(load_sources())
     state["proc"] = subprocess.Popen(["/bin/distribyted", "--config", GENERATED, "--http-port", "4444"])
     state["state"] = "running"
@@ -771,7 +824,7 @@ input[type=text],input[type=number],input[type=search],textarea{{font:inherit;pa
 .bar{{height:4px;background:var(--chip);border-radius:2px;margin-top:4px;overflow:hidden}}.bar i{{display:block;height:100%;background:var(--acc)}}
 .sub td{{padding:4px 6px 4px 22px;font-size:14px}}
 a{{color:var(--acc)}}a.seg{{color:inherit;text-decoration:none;border-bottom:1px dotted var(--mut)}}a.seg:hover{{color:var(--acc)}}
-.pill.mut{{color:var(--mut)}}#sr td button{{padding:1px 8px;font-size:12px}}
+.pill.mut{{color:var(--mut)}}.warn{{color:var(--warn)}}#sr td button{{padding:1px 8px;font-size:12px}}
 </style>
 <div class=page>
 <header><h1>athenafs</h1><span id=pill class="pill {pillcls}">{state}</span></header>
@@ -830,8 +883,9 @@ function pathHtml(p){{  // each folder of the path lists that folder when clicke
 function row(f){{
   const pct=f.size?Math.min(100,Math.round(f.cached*100/f.size)):0;
   const label=f.status=='partial'?'partial '+pct+'%':f.status;
+  const hl='<div class="small '+(f.dead?'warn':'mut')+'">'+esc(f.health_text||'')+'</div>';
   const btn=['cached','queued','caching'].includes(f.status)?'':'<button class=cache data-p="'+esc(f.path)+'">Cache</button>';
-  return '<tr><td class=small>'+pathHtml(f.path)+'</td><td class=n>'+sz(f.size)+'</td><td class=n><span class="pill '+(badge[f.status]||'')+'">'+esc(label)+'</span></td><td class=n>'+btn+'</td></tr>';
+  return '<tr><td class=small>'+pathHtml(f.path)+hl+'</td><td class=n>'+sz(f.size)+'</td><td class=n><span class="pill '+(badge[f.status]||'')+'">'+esc(label)+'</span></td><td class=n>'+btn+'</td></tr>';
 }}
 async function runSearch(more){{
   const q=document.getElementById('q').value.trim(), out=document.getElementById('sr');
@@ -850,7 +904,8 @@ async function runSearch(more){{
 }}
 async function cache(d){{
   const r=await post('/api/prefetch',d);
-  document.getElementById('srmsg').innerHTML='<div class=msg>'+esc(r.error?r.error:(r.queued+' file(s) queued for the cache, '+sz(r.size)+(r.already?' ('+r.already+' already queued)':'')+': progress under Activity'))+'</div>';
+  document.getElementById('srmsg').innerHTML='<div class=msg>'+esc(r.error?r.error:(r.queued+' file(s) queued for the cache, '+sz(r.size)+(r.already?' ('+r.already+' already queued)':'')+': progress under Activity'
+    +(r.no_peer?'. Warning: '+r.no_peer+' of them belong to torrents where the last health check found no peer at all':'')))+'</div>';
   runSearch(false);
 }}
 document.getElementById('q').addEventListener('input',()=>{{clearTimeout(st);st=setTimeout(()=>runSearch(false),250)}});
@@ -922,12 +977,16 @@ def render(s=None):
             counts[x["status"]] = counts.get(x["status"], 0) + 1
         status = ", ".join(f"{n} {st}" if len(xs) > 1 else st for st, n in counts.items())
         awake = sum(1 for x in xs if x.get("awake"))
+        dead = sum(1 for x in xs if looks_dead(x["hash"]))
+        checked = sum(1 for x in xs if x["hash"] in health)
         status += f" · {awake} awake" if len(xs) > 1 else (" · awake" if awake else " · dormant")
+        status += (f" · health: {checked}/{len(xs)} checked, {dead} with no peer found" if len(xs) > 1
+                   else f" · {health_text(xs[0]['hash'])}")
         names = sorted({x["name"] or (x["hash"] or "")[:12] for x in xs})
         label = html.escape(names[0]) + (f" <span class=mut>+{len(xs) - 1}</span>" if len(xs) > 1 else "")
         inner = ""
         for x in xs[:200]:
-            inner += (f"<tr class=sub><td>{html.escape(x['name'] or (x['hash'] or '')[:12])} <span class=\"mut small\">{x['kind']} · {(x['hash'] or '')[:8]}</span></td>"
+            inner += (f"<tr class=sub><td>{html.escape(x['name'] or (x['hash'] or '')[:12])} <span class=\"mut small\">{x['kind']} · {(x['hash'] or '')[:8]} · {health_text(x['hash'])}</span></td>"
                       f"<td class=\"n small\">{mb(x['size']) if x['size'] else ''}</td><td class=small>{html.escape(x['status'])}</td>"
                       f"<td class=n>{ask_form('id', x['id'], dis, 'Move', 'Move this torrent to the folder (an existing folder name merges it there):', route)} "
                       f"<form method=post action=/remove><input type=hidden name=id value={x['id']}>"
@@ -1093,7 +1152,7 @@ def sampler():
             dt = now - prev_net[0]
             activity["net_rx"], activity["net_tx"] = (net[0] - prev_net[1]) / dt, (net[1] - prev_net[2]) / dt
         prev_net = (now, *net)
-        rows, cur = [], {}
+        rows, cur, fresh = [], {}, {}
         for r in routes:
             for t in r.get("torrentStats") or []:
                 d, u = t.get("totalDownloadedBytes", 0), t.get("totalUploadedBytes", 0)
@@ -1101,10 +1160,19 @@ def sampler():
                 p = prev.get(t["hash"])
                 rd = max(0, (d - p[1]) / (now - p[0])) if p else 0
                 ru = max(0, (u - p[2]) / (now - p[0])) if p else 0
+                hl = t.get("health")
+                if hl and hl.get("checked", 0) > health.get(t["hash"], {}).get("checked", 0):
+                    fresh[t["hash"]] = {k: hl.get(k, 0) for k in ("known", "connected", "seeders", "checked")}
                 rows.append({"hash": t["hash"], "name": t["name"], "route": r["name"], "down": rd, "up": ru,
                              "peers": t.get("peers", 0), "seeders": t.get("seeders", 0),
                              "downloaded": d, "uploaded": u})
         prev = cur
+        if fresh:
+            health.update(fresh)
+            try:
+                save_health(fresh)
+            except sqlite3.Error as e:
+                print("health save:", e)
         # pieces that appeared in the cache since the last sample -> torrent, file
         try:
             pieces = {e.name: e.stat().st_size for e in os.scandir(CACHE)}
@@ -1317,7 +1385,8 @@ def search(q, limit=50, offset=0):
     out = []
     for h, path, tpath, size, off in rows:
         st, have = file_state(h, path, off, size, tp, cached)
-        out.append({"path": path, "size": size, "hash": h, "torrent_path": tpath, "cached": have, "status": st})
+        out.append({"path": path, "size": size, "hash": h, "torrent_path": tpath, "cached": have, "status": st,
+                    "health": health.get(h), "health_text": health_text(h), "dead": looks_dead(h)})
     return {"query": q, "total": min(total, SEARCH_CAP), "total_capped": total > SEARCH_CAP, "total_size": total_size,
             "offset": offset, "results": out}
 
@@ -1351,7 +1420,8 @@ def prefetch_add(q="", paths=()):
             return {"error": f"{mb(size)} is more than the cache can hold ({mb(capmb * 1e6)}): nothing queued", "size": size}
         for p, n, h in new:
             prefetch["queue"].append(p); prefetch["queued"][p] = n; prefetch["hash"][p] = h
-    return {"queued": len(new), "size": size, "already": len(rows) - len(new)}
+    dead = sum(1 for _, _, h in new if looks_dead(h))
+    return {"queued": len(new), "size": size, "already": len(rows) - len(new), "no_peer": dead}
 
 
 def prefetch_cancel():
@@ -1450,6 +1520,7 @@ def watchdog():
 
 
 def main():
+    load_health()
     start()
     threading.Thread(target=watchdog, daemon=True).start()
     threading.Thread(target=sampler, daemon=True).start()
