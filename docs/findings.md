@@ -185,10 +185,27 @@ With 526 sources (524 parts of one collection), starting was the problem, not se
 - **The real limit is the BitTorrent client.** Every torrent runs its own DHT announcer and one scraper per tracker, all
   behind the client's single lock. Goroutine dump with 526 torrents: 486 DHT announcers and about 300 tracker tasks waiting
   for that lock. Adding them all then takes about 1.5 minutes after each start (the stats call takes seconds meanwhile, and
-  the container uses about 1.7 cores); at rest it uses about 15 % of a core and 4.8 GB of memory. Nothing is wrong, it is just a lot of torrents for one client. Not solved: the way out
-  would be to keep idle torrents quiet (no announce until a file of theirs is read), which is a deeper change.
+  the container uses about 1.7 cores); at rest it uses about 15 % of a core and 4.8 GB of memory. Nothing is wrong, it is just a lot of torrents for one client. Solved by dormant torrents (below).
 - The supervisor got slow with them too (9 s per refresh): magnet links were parsed again at every refresh and conflicts
   recomputed over every file. Both are cached now (0.14 s). The page lists at most 200 torrents per folder (all are in `/api`).
+
+## Performance with 636 torrents: supervisor and dormant torrents (2026-10-21)
+
+Measured with `scripts/measure.sh`, one row per commit in `docs/measurements.md` (dataset: 636 torrents, 12.5 million
+pieces, 443,000 files, 258 TB).
+- **Supervisor** (30f91c1): piece hashes as one 20-byte-per-piece block per torrent instead of lists and sets of strings;
+  a piece -> (torrent, index) table in SQLite (1.2 GB, built once in about 3.5 minutes, then per torrent) so that status,
+  cache tree, activity and search only look at the cached pieces; status and page computed every 3 s in the background.
+  Supervisor memory 13.9 GB -> 0.9 GB, `/api` and page from no answer in 120 s to instant, search 13.7 s -> 0.01 s.
+- **Dormant torrents** (e9c3b55, patch `dormant_torrents.patch`): a torrent given as a .torrent file is served from its
+  metadata, folders list without the client, and the torrent enters the client only when one of its files is opened; it
+  leaves again 600 s (`ATHENAFS_DORMANT_AFTER`) after its last file was closed. Distribyted 13.8 GB -> 1.0 GB, CPU at rest
+  85 % -> 9 %, every torrent in its folder 10 s after a start (210 s before). Checked: listing never wakes a torrent; a read
+  wakes it (37 peers, a 20-60 MB file in 15 s including the wake); it went back to sleep 80 s after the read with a 60 s
+  delay; read again afterwards it came from the cache (3 kB received). The storage `Close` of a dropped torrent is a no-op,
+  the cache is shared. Dormant torrents do not seed. Magnets still without metadata stay in the client until it arrives.
+- **Incident:** Docker's default 10 s stop timeout killed Distribyted mid-stop and left a dead FUSE mount (the share was
+  down). `stop_grace_period: 60s`, stale FUSE mounts cleared by the supervisor and `up.sh`.
 
 ## Activity, search and other page features (2026-10-21)
 

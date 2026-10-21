@@ -79,9 +79,9 @@ data/                  runtime data, not in git: torrents/ (optional .torrent fi
 - Read-ahead is wide: a few times more data can be received than is read.
 - Finder and Windows Explorer themselves (previews, thumbnails) were not tested, only equivalent commands.
 - The patches to Distribyted are local; they are not proposed upstream yet.
-- Hundreds of torrents work but cost: every torrent announces on its own (DHT and trackers) behind one client lock. With 526,
-  adding them all takes about 1.5 minutes after each restart (the folders fill in meanwhile), and the core then uses
-  about 15 % of a core and 4.8 GB of memory.
+- Torrents are dormant until one of their files is opened (`ATHENAFS_DORMANT_AFTER`, 600 s after the last close; `0` keeps
+  every torrent in the BitTorrent client): a dormant torrent does not seed, and its first read waits for peers. With 636
+  torrents (258 TB) the core uses about 1 GB and 9 % of a core at rest; see `docs/measurements.md`.
 
 ## Licence
 Not chosen yet. Distribyted is GPL-3.0, and the patches in `core/` are derivative work of it, so any publication must be
