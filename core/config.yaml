@@ -1,0 +1,21 @@
+# Base configuration of the patched Distribyted. The torrents served are NOT listed here: the supervisor (admin.py)
+# keeps them in /data/sources.json and generates the real configuration from this file plus that list, on every start.
+# Everything above `routes:` is used as is, except `global_cache_size`, which the web page can override.
+http:
+  port: 4444                     # internal API, used by the supervisor; not published
+  ip: "127.0.0.1"
+  httpfs: false
+torrent:
+  global_cache_size: 2048        # MB: disk space limit, the least recently read data is dropped
+  metadata_folder: /data/metadata
+  add_timeout: 45                # seconds to get a magnet's metadata (each unresolved magnet delays the mount by this much)
+  read_timeout: 60               # a stuck read returns an error instead of freezing the client
+  continue_when_add_timeout: true
+fuse:
+  path: /mnt/torrents/fs
+  allow_other: true
+log:
+  path: /data/logs
+  max_size: 50
+  debug: true
+routes: []

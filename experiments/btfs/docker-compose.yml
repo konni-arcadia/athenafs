@@ -1,0 +1,23 @@
+# btfs test. Data (cache, mount) lives outside the repo: ${DATA}
+services:
+  btfs:
+    build: .
+    container_name: athenafs-btfs-experiment
+    restart: "no"
+    devices: ["/dev/fuse:/dev/fuse"]
+    cap_add: [SYS_ADMIN]
+    security_opt: ["apparmor:unconfined"]
+    environment:
+      UPLOAD_KBS: "1"
+    networks: [experiment]
+    volumes:
+      - ./sources.txt:/config/sources.txt:ro
+      - ${DATA}/torrents:/torrents:ro
+      - ${DATA}/cache:/cache
+      - type: bind
+        source: ${DATA}/mnt
+        target: /mnt/torrents
+        bind:
+          propagation: rshared
+networks:
+  experiment: {}

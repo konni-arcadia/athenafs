@@ -1,0 +1,44 @@
+# athenafs: torrents as a read-only network folder.
+#   core = patched Distribyted (FUSE filesystem, downloads on demand) + a supervisor with a web page
+#   smb  = Samba, sharing the FUSE mount read-only
+# Start with scripts/up.sh (it prepares the host mount point); see README.md.
+name: athenafs
+services:
+  core:
+    build: ./core
+    container_name: athenafs-core
+    restart: "no"
+    devices: ["/dev/fuse:/dev/fuse"]
+    cap_add: [SYS_ADMIN]
+    security_opt: ["apparmor:unconfined"]
+    environment:
+      DISTRIBYTED_CONFIG: /config/config.yaml
+      DISTRIBYTED_METAINFO_DIR: /data/metainfo
+      DISTRIBYTED_ARCHIVES: "${ATHENAFS_ARCHIVES:-off}"   # "on": zip/7z/rar open as folders (expensive to browse)
+    ports: ["${ATHENAFS_BIND:-127.0.0.1}:${ATHENAFS_PORT:-8080}:8080"]
+    volumes:
+      - ./core/config.yaml:/config/config.yaml:ro
+      - ${DATA:-./data}/torrents:/torrents:ro      # optional .torrent files provided by hand (read-only)
+      - ${DATA:-./data}/state:/data                # cache, sources.json, settings, saved metadata, logs
+      - type: bind
+        source: ${DATA:-./data}/mount              # the FUSE mount appears in mount/fs/<folder>/ on the host
+        target: /mnt/torrents
+        bind:
+          propagation: rshared
+  smb:
+    build: ./smb
+    container_name: athenafs-smb
+    restart: "no"
+    depends_on: [core]
+    ports: ["${SMB_BIND:-127.0.0.1}:${SMB_PORT:-445}:445"]
+    environment:
+      SMB_USER: "${SMB_USER:-tor}"
+      SMB_PASS: "${SMB_PASS:-rent}"
+    volumes:
+      # rslave: sees the FUSE mounts (re)made by the core container, without being able to propagate anything back
+      - type: bind
+        source: ${DATA:-./data}/mount
+        target: /srv/m
+        read_only: true
+        bind:
+          propagation: rslave
