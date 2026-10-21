@@ -419,6 +419,9 @@ def looks_dead(h):
     return bool(x) and not x["known"] and not x["connected"]
 
 
+PAGE_URL = os.environ.get("ATHENAFS_PAGE_URL", "")
+
+
 def write_root_files():
     """Links to this page at the root of the share: .webloc opens in macOS, .url in Windows."""
     os.makedirs(ROOT_FILES, exist_ok=True)
