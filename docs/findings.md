@@ -205,6 +205,15 @@ pieces, 443,000 files, 258 TB).
   delay; read again afterwards it came from the cache (3 kB received). The storage `Close` of a dropped torrent is a no-op,
   the cache is shared. Dormant torrents do not seed. Magnets still without metadata stay in the client until it arrives.
   The share was checked from a Mac with this patch (browsing and copying: fine).
+- **Health check** (c9145b6, patch `health_check.patch`): dormant torrents are woken in turn, 2 at a time for 60 s
+  (`ATHENAFS_HEALTH_PARALLEL`, `ATHENAFS_HEALTH_PROBE`, 0 = off), without opening a file, so nothing is downloaded; the most
+  peers known, connected and seeders seen are kept in SQLite by the supervisor, which also writes the order of the next
+  checks (never or least recently checked first). A full round of 636 torrents takes about 5 h. A torrent that wants no
+  data seldom connects: first test, 71 of 88 had peers announced (13 to 77) and none connected, so "peers announced" is the
+  signal and only "no peer found at all" counts as dead (warning when such files are queued for the cache). Cost measured:
+  none visible (CPU at rest 9 %, Distribyted 1.1 GB, with two probes running).
+- **Incident:** a later edit dropped a module-level line of `admin.py` (`PAGE_URL`); the core exited at start and the
+  share was down until the fix (1d32791). The test build predated that edit: rebuild after the last edit.
 - **Incident:** Docker's default 10 s stop timeout killed Distribyted mid-stop and left a dead FUSE mount (the share was
   down). `stop_grace_period: 60s`, stale FUSE mounts cleared by the supervisor and `up.sh`.
 
