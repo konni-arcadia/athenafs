@@ -23,3 +23,4 @@ Corrections (rows are not rewritten):
 | 2026-10-21T14:38Z | e9c3b55 | 642 / 636 / 12479029 / 442784 / 258.3 TB | 1 | 10 | 636 | 9 | 1.0 | 0.8 | 0.00 | 0.00 | 0.00 | 0.01 | dormant torrents (idle 600 s) |
 | 2026-10-21T16:43Z | 1d2ff37 | 642 / 636 / 12479029 / 442784 / 258.3 TB | 0 | 8 | 636 | 9 | 1.1 | 1.0 | 0.00 | 0.00 | 0.00 | 0.01 | health check (2 at a time, 60 s; probes running during the rest sample) |
 | 2026-10-21T17:02Z | 30ee655 | 642 / 637 / 12512828 / 446609 / 258.9 TB | 0 | 8 | 637 | 13 | 1.1 | 0.9 | 0.00 | 0.00 | 0.00 | 0.01 | API: status, usage, locations, erase by path |
+| 2026-10-21T20:12Z | 74e2f59 | 642 / 637 / 12512828 / 446609 / 258.9 TB | 0 | 9 | 637 | 10 | 1.1 | 0.7 | 0.00 | 0.00 | 0.00 | 0.01 | settings through .env; inline rename |
