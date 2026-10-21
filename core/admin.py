@@ -944,9 +944,15 @@ loadUsage(); setInterval(()=>{{if(!document.querySelector('#ures [data-armed]'))
 document.getElementById('q').addEventListener('input',()=>{{clearTimeout(st);st=setTimeout(()=>runSearch(false),250)}});
 document.addEventListener('click',e=>{{
   const t=e.target;
-  if(t.dataset.copy!==undefined){{e.preventDefault();navigator.clipboard?.writeText(t.dataset.copy).then(()=>{{t.textContent='copied'}},()=>{{prompt('Path:',t.dataset.copy)}})}}
+  if(t.dataset.copy!==undefined){{e.preventDefault();navigator.clipboard?.writeText(t.dataset.copy).then(()=>{{t.textContent='copied'}},()=>{{t.textContent=t.dataset.copy;t.style.userSelect='all'}})}}
   else if(t.classList.contains('seg')||t.classList.contains('browse')){{e.preventDefault();const q=document.getElementById('q');q.value='folder:'+t.dataset.f;q.scrollIntoView({{block:'center'}});runSearch(false)}}
   else if(t.classList.contains('cache'))cache({{path:t.dataset.p}});
+  else if(t.classList.contains('askopen')){{  // Rename / Move: a name field in place
+    const f=t.closest('form'); f.dataset.armed=1; t.remove();
+    f.insertAdjacentHTML('beforeend','<input type=text name=new required style="width:200px" value="'+esc(f.dataset.current)+'"> <button>OK</button> <button type=button class=askcancel>Cancel</button><div class="mut small">'+esc(f.title)+'</div>');
+    const i=f.querySelector('input[name=new]'); i.focus(); i.select();
+  }}
+  else if(t.classList.contains('askcancel')){{const f=t.closest('form');delete f.dataset.armed;location.reload()}}
   else if(t.dataset.uerase!==undefined){{
     if(!t.dataset.armed){{t.dataset.armed=1;t.textContent='Confirm erase (restarts the service)';setTimeout(()=>{{if(t.isConnected){{delete t.dataset.armed;t.textContent='Erase'}}}},6000)}}
     else{{t.disabled=true;t.textContent='Erasing…';fetch('/api/erase',{{method:'POST',headers:{{'Content-Type':'application/x-www-form-urlencoded'}},body:t.dataset.uerase}})
@@ -989,11 +995,11 @@ def node(ih, n, dis):
 
 
 def ask_form(field, value, dis, label, question, current):
-    """A button that asks for a folder name, then posts it to /rename."""
-    q = json.dumps(question).replace('"', "&quot;"); c = json.dumps(current).replace('"', "&quot;")
-    return (f"<form method=post action=/rename onsubmit=\"const n=prompt({q},{c});if(!n||n=={c})return false;this.new.value=n\">"
-            f"<input type=hidden name={field} value=\"{html.escape(value, quote=True)}\"><input type=hidden name=new>"
-            f"<button {dis}>{label}</button></form>")
+    """A button that opens a name field in place (no prompt() pop-up: blocked silently in embedded browsers), then
+    posts the name to /rename."""
+    return (f"<form method=post action=/rename class=ask data-current=\"{html.escape(current, quote=True)}\" "
+            f"title=\"{html.escape(question, quote=True)}\"><input type=hidden name={field} value=\"{html.escape(value, quote=True)}\">"
+            f"<button type=button class=askopen {dis}>{label}</button></form>")
 
 
 def render(s=None):
