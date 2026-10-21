@@ -14,14 +14,15 @@ running=$(docker exec athenafs-core printenv ATHENAFS_COMMIT 2>/dev/null || echo
 logcount() { docker logs athenafs-core 2>&1 | grep -c "$1" || true; }
 since() { echo $(( $(date +%s) - $1 )); }
 
-# start-up: restart the core, time the mount and the time until no torrent has been added for 30 s
+# start-up: restart the core, time the mount and the time until no torrent has been added for 90 s (they arrive in
+# bursts with pauses of 20 to 40 s), at most 15 minutes
 docker restart -t 60 athenafs-core >/dev/null   # enough time to unmount cleanly (Docker's default 10 s is not)
 t0=$(date +%s)
 # mounted = the folder can be listed (a stale mount is in /proc/mounts too, but fails)
 until docker exec athenafs-core sh -c 'ls /mnt/torrents/fs >/dev/null 2>&1' 2>/dev/null; do sleep 1; done
 t_mount=$(since $t0)
 last=-1; quiet=0; t_added=0
-while [ $quiet -lt 30 ]; do
+while [ $quiet -lt 90 ] && [ $(since $t0) -lt 900 ]; do
   n=$(logcount 'torrent added')
   if [ "$n" != "$last" ]; then last=$n; quiet=0; t_added=$(since $t0); else quiet=$((quiet + 2)); fi
   sleep 2
@@ -53,7 +54,7 @@ from. Rows are only ever added. The dataset changes between rows (torrents are a
 
 - **dataset**: sources / torrents with metadata / pieces / files / total size of those torrents.
 - **mount**: seconds from the restart of the core container to the FUSE mount. **added**: seconds until no torrent has
-  been added for 30 s (all known torrents in their folders). **mounted**: sources mounted at the end.
+  been added for 90 s (all known torrents in their folders; at most 900). **mounted**: sources mounted at the end.
 - **CPU**: core container at rest (60 s after the start-up), average of 5 samples, % of one core.
 - **RSS**: resident memory in GB of Distribyted and of the supervisor (admin.py).
 - **times**: seconds, median of 3: `/api`, `/` (page), `/api/activity`, `/api/search?q=text`.
