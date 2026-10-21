@@ -868,7 +868,7 @@ a{{color:var(--acc)}}a.seg{{color:inherit;text-decoration:none;border-bottom:1px
 <div style="margin-top:10px">{capform}
 <div class="mut small">Largest cache cap possible now: {dmax} (free space + what is already cached − 1 GB).</div>
 <form method=post action=/erase style="margin-top:12px"><input type=hidden name=h value=all>
-<button class=danger {dis} onclick="return confirm('Erase ALL local data? The service restarts (a few seconds) and reads in progress fail.')">Erase everything</button></form>
+<button class=danger {dis} data-confirm="Erase ALL local data? The service restarts (a few seconds) and reads in progress fail.">Erase everything</button></form>
 <p class="mut small">Erasing or removing restarts the service: the share is unavailable for a few seconds and reads in progress fail.
 It does not delete the .torrent files of the setup or the configuration.</p></div></details></section>
 <p class="mut small">Refreshes every 5 s · <a href=/api>API</a></p>
@@ -899,7 +899,7 @@ async function runSearch(more){{
   const h=r.results.map(row).join('');
   const shown=so+r.results.length;
   const head='<div id=srh class=add><span class=mut>'+(r.total_capped?'more than '+r.total:r.total)+' file'+(r.total==1?'':'s')+', '+sz(r.total_size)
-    +(shown<r.total?' · showing '+shown:'')+'</span>'+(r.total?' <button id=srall>Cache all '+(r.total_capped?'(first '+r.total+')':'')+'</button>':'')+'</div>';
+    +(shown<r.total?' · showing '+shown:'')+'</span>'+(r.total?' <button id=srall data-n="'+r.total+'" data-s="'+r.total_size+'">Cache all '+(r.total_capped?'(first '+r.total+')':'')+'</button>':'')+'</div>';
   if(more){{document.getElementById('srt').insertAdjacentHTML('beforeend',h);document.getElementById('srh').outerHTML=head}}
   else out.innerHTML=head+'<div class=wrap><table id=srt>'+h+'</table></div>';
   document.getElementById('srm')?.remove();
@@ -916,11 +916,19 @@ document.addEventListener('click',e=>{{
   const t=e.target;
   if(t.classList.contains('seg')||t.classList.contains('browse')){{e.preventDefault();const q=document.getElementById('q');q.value='folder:'+t.dataset.f;q.scrollIntoView({{block:'center'}});runSearch(false)}}
   else if(t.classList.contains('cache'))cache({{path:t.dataset.p}});
-  else if(t.id=='srall'){{if(confirm('Read every file of this search into the cache?'))cache({{q:document.getElementById('q').value.trim()}})}}
+  else if(t.dataset.confirm!==undefined){{  // in-page confirmation (a confirm() pop-up can be blocked silently)
+    if(!t.dataset.armed){{e.preventDefault();t.dataset.armed=1;t.dataset.label=t.textContent;t.textContent='Confirm: '+t.dataset.confirm;
+      setTimeout(()=>{{if(t.isConnected){{delete t.dataset.armed;t.textContent=t.dataset.label}}}},6000)}}
+  }}
+  else if(t.id=='srall'){{  // two steps in the page: a confirm() pop-up can be blocked silently (embedded browsers)
+    if(t.dataset.armed){{t.disabled=true;t.textContent='Queuing…';cache({{q:document.getElementById('q').value.trim()}})}}
+    else{{t.dataset.armed=1;t.classList.add('danger');t.textContent='Confirm: read '+t.dataset.n+' file(s), '+sz(+t.dataset.s)+' into the cache';
+      setTimeout(()=>{{if(t.isConnected&&!t.disabled){{delete t.dataset.armed;t.classList.remove('danger');t.textContent='Cache all'}}}},6000)}}}}
   else if(t.id=='srm'){{so+=100;runSearch(true)}}
   else if(t.id=='pfcancel')post('/api/prefetch/cancel',{{}});
 }});
 setInterval(async()=>{{try{{
+  if(document.querySelector('#m [data-armed]'))return;  // a button waits for its confirmation
   const o=new Set([...document.querySelectorAll('#m details[open]')].map(d=>d.dataset.k));
   const t=await (await fetch('/',{{cache:'no-store'}})).text();
   const d=new DOMParser().parseFromString(t,'text/html'), n=d.getElementById('m'); if(!n)return;
@@ -934,7 +942,7 @@ setInterval(async()=>{{try{{
 def node(ih, n, dis):
     """HTML of one folder or file of the tree, with its Erase button."""
     button = (f"<form method=post action=/erase><input type=hidden name=h value={ih}><input type=hidden name=p value=\"{html.escape(n['path'], quote=True)}\">"
-              f"<button class=danger {dis} onclick=\"return confirm('Erase the local data of {html.escape(n['name'], quote=True)}?')\">Erase</button></form>")
+              f"<button class=danger {dis} data-confirm=\"Erase the local data of {html.escape(n['name'], quote=True)}?\">Erase</button></form>")
     if not n["children"]:
         return f"<div class=row><span>{html.escape(n['name'])}</span><span class=sz>≈ {mb(n['size'])} {button}</span></div>"
     kids = sorted(n["children"].values(), key=lambda x: -x["size"])
@@ -961,7 +969,7 @@ def render(s=None):
         rows += (f"<tr><td><b>{html.escape(i['name'])}</b><br><span class=\"mut small\">{html.escape(i['route'])} · {i['pieces']} pieces · {i['peers']} peers</span></td>"
                  f"<td class=n>{mb(i['total'])}</td><td class=n>{mb(i['cache'])}</td>"
                  f"<td class=n><form method=post action=/erase><input type=hidden name=h value={i['hash']}>"
-                 f"<button class=danger {dis} onclick=\"return confirm('Erase the local data of this whole torrent?')\">Erase</button></form></td></tr>")
+                 f"<button class=danger {dis} data-confirm=\"Erase the local data of this whole torrent?\">Erase</button></form></td></tr>")
         if i["tree"]:
             kids = sorted(i["tree"]["children"].values(), key=lambda x: -x["size"])
             body = "".join(node(i["hash"], e, dis) for e in kids[:300])
@@ -993,8 +1001,8 @@ def render(s=None):
                       f"<td class=\"n small\">{mb(x['size']) if x['size'] else ''}</td><td class=small>{html.escape(x['status'])}</td>"
                       f"<td class=n>{ask_form('id', x['id'], dis, 'Move', 'Move this torrent to the folder (an existing folder name merges it there):', route)} "
                       f"<form method=post action=/remove><input type=hidden name=id value={x['id']}>"
-                      f"<button class=danger {dis} name=erase value=1 onclick=\"return confirm('Remove this torrent and erase its local data?')\">Remove</button> "
-                      f"<button {dis} name=erase value=0 onclick=\"return confirm('Remove this torrent and keep its local data?')\">Remove, keep data</button></form></td></tr>")
+                      f"<button class=danger {dis} name=erase value=1 data-confirm=\"Remove this torrent and erase its local data?\">Remove</button> "
+                      f"<button {dis} name=erase value=0 data-confirm=\"Remove this torrent and keep its local data?\">Remove, keep data</button></form></td></tr>")
         srows += (f"<tr><td><b>{html.escape(route)}</b> <a href=# class=browse data-f=\"{html.escape(route, quote=True)}\">browse</a> {ask_form('route', route, dis, 'Rename', 'New name for this folder (an existing folder name merges the two; later torrents of the old name follow):', route)}</td><td>{label}</td><td class=n>{mb(sum(x['size'] for x in xs))}</td>"
                   f"<td>{html.escape(status)}</td></tr>"
                   f"<tr><td colspan=4 style=\"padding-top:0\"><details data-k=\"src/{html.escape(route, quote=True)}\"><summary class=\"mut small\">"
