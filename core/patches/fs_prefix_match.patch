@@ -1,0 +1,29 @@
+diff --git a/fs/storage.go b/fs/storage.go
+index 9271b23..33de3b8 100644
+--- a/fs/storage.go
++++ b/fs/storage.go
+@@ -158,9 +158,14 @@ func (s *storage) Get(path string) (File, error) {
+ 	return s.getFileFromFs(path)
+ }
+ 
++// underFs reports whether p is fsp or a path inside it (not merely a name that starts the same way).
++func underFs(p, fsp string) bool {
++	return fsp == separator || p == fsp || strings.HasPrefix(p, fsp+separator)
++}
++
+ func (s *storage) getFileFromFs(p string) (File, error) {
+ 	for fsp, fs := range s.filesystems {
+-		if strings.HasPrefix(p, fsp) {
++		if underFs(p, fsp) {
+ 			return fs.Open(separator + strings.TrimPrefix(p, fsp))
+ 		}
+ 	}
+@@ -170,7 +175,7 @@ func (s *storage) getFileFromFs(p string) (File, error) {
+ 
+ func (s *storage) getDirFromFs(p string) (map[string]File, error) {
+ 	for fsp, fs := range s.filesystems {
+-		if strings.HasPrefix(p, fsp) {
++		if underFs(p, fsp) {
+ 			path := strings.TrimPrefix(p, fsp)
+ 			return fs.ReadDir(path)
+ 		}

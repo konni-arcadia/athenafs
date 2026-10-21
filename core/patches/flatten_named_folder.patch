@@ -1,0 +1,73 @@
+diff --git a/fs/torrent.go b/fs/torrent.go
+index 77664fe..fcf42fe 100644
+--- a/fs/torrent.go
++++ b/fs/torrent.go
+@@ -3,6 +3,8 @@ package fs
+ import (
+ 	"context"
+ 	"io"
++	"regexp"
++	"strings"
+ 	"sync"
+ 	"time"
+ 
+@@ -14,6 +16,7 @@ import (
+ var _ Filesystem = &Torrent{}
+ 
+ type Torrent struct {
++	Route       string // name of the folder this filesystem is served in
+ 	mu          sync.RWMutex
+ 	ts          map[string]*torrent.Torrent
+ 	s           *storage
+@@ -62,12 +65,17 @@ func (fs *Torrent) load() {
+ 
+ 	for _, t := range fs.ts {
+ 		<-t.GotInfo()
++		flatten := len(t.Info().Files) > 0 && sanitizeRoute(t.Info().BestName()) == fs.Route
+ 		for _, file := range t.Files() {
++			p := file.Path()
++			if flatten { // the folder is already named after the torrent: skip the torrent's own top-level directory
++				p = file.DisplayPath()
++			}
+ 			fs.s.Add(&torrentFile{
+ 				readerFunc: file.NewReader,
+ 				len:        file.Length(),
+ 				timeout:    fs.readTimeout,
+-			}, file.Path())
++			}, p)
+ 		}
+ 	}
+ 
+@@ -205,3 +213,17 @@ func (d *torrentFile) ReadAt(p []byte, off int64) (n int, err error) {
+ 	d.load()
+ 	return d.reader.ReadAt(p, off)
+ }
++
++var unsafeRouteChars = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
++
++// sanitizeRoute names a folder after a torrent the way the supervisor (admin.py, sanitize) does.
++func sanitizeRoute(name string) string {
++	s := strings.Trim(unsafeRouteChars.ReplaceAllString(name, "-"), "-.")
++	if s == "" {
++		s = "torrent"
++	}
++	if len(s) > 60 {
++		s = s[:60]
++	}
++	return s
++}
+diff --git a/torrent/service.go b/torrent/service.go
+index 1954ffb..86e933c 100644
+--- a/torrent/service.go
++++ b/torrent/service.go
+@@ -130,7 +130,9 @@ func (s *Service) addRoute(r string) {
+ 	defer s.mu.Unlock()
+ 	_, ok := s.fss[folder]
+ 	if !ok {
+-		s.fss[folder] = fs.NewTorrent(s.readTimeout)
++		tfs := fs.NewTorrent(s.readTimeout)
++		tfs.Route = r
++		s.fss[folder] = tfs
+ 	}
+ }
+ 

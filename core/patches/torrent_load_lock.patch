@@ -1,0 +1,40 @@
+diff --git a/fs/torrent.go b/fs/torrent.go
+index 33ebd7e..77664fe 100644
+--- a/fs/torrent.go
++++ b/fs/torrent.go
+@@ -48,11 +48,17 @@ func (fs *Torrent) RemoveTorrent(h string) {
+ }
+ 
+ func (fs *Torrent) load() {
++	fs.mu.RLock()
++	loaded := fs.loaded
++	fs.mu.RUnlock()
++	if loaded {
++		return
++	}
++	fs.mu.Lock()
++	defer fs.mu.Unlock()
+ 	if fs.loaded {
+ 		return
+ 	}
+-	fs.mu.RLock()
+-	defer fs.mu.RUnlock()
+ 
+ 	for _, t := range fs.ts {
+ 		<-t.GotInfo()
+@@ -70,11 +76,15 @@ func (fs *Torrent) load() {
+ 
+ func (fs *Torrent) Open(filename string) (File, error) {
+ 	fs.load()
++	fs.mu.RLock()
++	defer fs.mu.RUnlock()
+ 	return fs.s.Get(filename)
+ }
+ 
+ func (fs *Torrent) ReadDir(path string) (map[string]File, error) {
+ 	fs.load()
++	fs.mu.RLock()
++	defer fs.mu.RUnlock()
+ 	return fs.s.Children(path)
+ }
+ 

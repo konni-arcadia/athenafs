@@ -15,6 +15,21 @@ RUN printf 'package fs\n\nimport "os"\n\nfunc init() {\n\tif os.Getenv("DISTRIBY
 COPY patches/metainfo_dump.go /src/torrent/metainfo_dump.go
 RUN sed -i 's|// Add to stats|dumpMetainfo(t) // Add to stats|' torrent/service.go \
  && test "$(grep -c 'dumpMetainfo(t)' torrent/service.go)" = 1
+# Local patch: Torrent.load() filled its file table under a read lock, so two concurrent first accesses (start-up and a
+# FUSE/Samba request) wrote the same Go map and the process died with "concurrent map read and map write". Seen with
+# 64 torrents (the longer load makes the overlap likely). load() now takes the write lock; Open/ReadDir read under the read lock.
+COPY patches/torrent_load_lock.patch /tmp/torrent_load_lock.patch
+RUN git apply /tmp/torrent_load_lock.patch
+# Local patch: a path was routed to the first mounted filesystem whose name it merely starts with, so the folder
+# "name-13" could be served by "name-1" or "name" (map order is random) and fail with "No such file or directory".
+# A path now belongs to a filesystem only if it is that path or lies under it.
+COPY patches/fs_prefix_match.patch /tmp/fs_prefix_match.patch
+RUN git apply /tmp/fs_prefix_match.patch
+# Local patch: a multi-file torrent served in a folder named after it showed its name twice (folder/name/...). When the
+# folder's name is the torrent's name (sanitised like admin.py does), the torrent's own top-level directory is skipped.
+# Applies after the lock patch (same file).
+COPY patches/flatten_named_folder.patch /tmp/flatten_named_folder.patch
+RUN git apply /tmp/flatten_named_folder.patch
 RUN BIN_OUTPUT=/bin/distribyted make build
 
 FROM alpine:3

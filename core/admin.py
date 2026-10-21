@@ -10,7 +10,7 @@ The torrents served are kept in /data/sources.json; the Distribyted configuratio
 configuration (/config/config.yaml, everything above `routes:`) plus those sources.
 """
 import base64, bisect, hashlib, hmac, html, http.server, ipaddress, json, os, re, secrets, shutil, signal, socket, subprocess
-import threading, urllib.error, urllib.parse, urllib.request
+import threading, time, urllib.error, urllib.parse, urllib.request
 
 CFG = os.environ.get("DISTRIBYTED_CONFIG", "/config/config.yaml")
 DATA = "/data/metadata"
@@ -164,12 +164,20 @@ def save_sources(sources):
     os.replace(tmp, SOURCES)
 
 
-def unique_route(sources, wanted):
-    base, n, taken = sanitize(wanted), 1, {s["route"] for s in sources}
-    name = base
-    while name in taken:
-        n += 1; name = f"{base}-{n}"
-    return name
+def route_for(wanted):
+    """Folder of a new source. A folder that already exists is joined, not renamed: torrents with the same folder name are
+    served merged in one folder (Distribyted overlays the file trees of the torrents of a route)."""
+    return sanitize(wanted)
+
+
+def saved_metainfo(h):
+    """Path of the metadata saved for a magnet once resolved, if it is complete and matches; else None.
+    Starting a magnet from it skips the metadata lookup (up to add_timeout per magnet at every start)."""
+    fn = os.path.join(METAINFO, f"{h}.torrent")
+    try:
+        return fn if h and parse_torrent(open(fn, "rb").read())["hash"] == h else None
+    except Exception:
+        return None
 
 
 def generate_config(sources):
@@ -186,9 +194,14 @@ def generate_config(sources):
         out += "routes: []\n"
     else:
         out += "routes:\n"
+        routes = {}   # one route per folder, holding every source of that folder (insertion order kept)
         for s in sources:
-            key = "magnet_uri" if s["kind"] == "magnet" else "torrent_path"
-            out += f"  - name: {s['route']}\n    torrents:\n      - {key}: {json.dumps(s['value'])}\n"
+            key, value = ("magnet_uri" if s["kind"] == "magnet" else "torrent_path"), s["value"]
+            if s["kind"] == "magnet" and (saved := saved_metainfo(magnet_hash(value))):
+                key, value = "torrent_path", saved
+            routes.setdefault(s["route"], []).append(f"      - {key}: {json.dumps(value)}\n")
+        for route, lines in routes.items():
+            out += f"  - name: {route}\n    torrents:\n" + "".join(lines)
     with open(GENERATED, "w") as f:
         f.write(out)
 
@@ -422,36 +435,47 @@ def add_torrent_bytes(raw, wanted_route=""):
     fn = os.path.join(ADDED, sid + ".torrent")
     with open(fn, "wb") as f:
         f.write(raw)
-    sources.append({"id": sid, "route": unique_route(sources, wanted_route or t["name"]), "kind": "file", "value": fn})
+    sources.append({"id": sid, "route": route_for(wanted_route or t["name"]), "kind": "file", "value": fn})
     save_sources(sources)
     return f"added: {t['name']} ({t['total'] / 1e6:.0f} MB)"
 
 
-def add_link(link, wanted_route=""):
-    """Add a magnet link or the URL of a .torrent file. Starts in a thread, restarts the service."""
-    link = link.strip()
-    if link.startswith("magnet:"):
-        h = magnet_hash(link)
-        if not h:
-            state["message"] = "not a valid magnet link (needs xt=urn:btih:…): nothing added"; return
-        sources = load_sources()
-        if any(source_hash(s) == h for s in sources):
-            state["message"] = "already present: that magnet"; return
-        dn = urllib.parse.parse_qs(link[8:]).get("dn", [""])[0]
+def add_links(text, wanted_route=""):
+    """Add magnet links and/or URLs of .torrent files, one per line. Starts in a thread; one restart for the whole batch.
+    A folder name puts the whole batch in that one folder (merged); without it, each torrent goes to the folder of its name."""
+    links = [l.strip() for l in text.splitlines() if l.strip()]
+    known = {source_hash(s) for s in load_sources()}
+    magnets, files, skipped = [], [], []
+    for link in links:
+        if link.startswith("magnet:"):
+            h = magnet_hash(link)
+            if not h:
+                skipped.append(f"not a valid magnet link: {link[:40]}…"); continue
+            if h in known:
+                skipped.append(f"already present: {h[:8]}"); continue
+            known.add(h)
+            magnets.append((link, h, urllib.parse.parse_qs(link[8:]).get("dn", [""])[0]))
+        else:
+            try:   # fetched before stopping the service, so the mounts stay up while downloading
+                files.append(fetch_torrent(link))
+            except Exception as e:
+                skipped.append(f"could not fetch {link[:40]}: {e}")
+    if not magnets and not files:
+        state["message"] = "; ".join(skipped) or "nothing to add"; return
 
-        def job():
-            srcs = load_sources()
-            srcs.append({"id": secrets.token_hex(4), "route": unique_route(srcs, wanted_route or dn or h[:8]),
+    def job():
+        srcs, added = load_sources(), []
+        for link, h, dn in magnets:
+            srcs.append({"id": secrets.token_hex(4), "route": route_for(wanted_route or dn or h[:8]),
                          "kind": "magnet", "value": link})
-            save_sources(srcs)
-            return f"added magnet {dn or h[:8]}: waiting for its metadata (up to the add timeout)"
-        exclusive(job)
-        return
-    try:
-        raw = fetch_torrent(link)
-    except Exception as e:
-        state["message"] = f"could not fetch that URL: {e}"; return
-    exclusive(lambda: add_torrent_bytes(raw, wanted_route))
+            added.append(dn or h[:8])
+        save_sources(srcs)
+        msgs = [f"added magnet {a}" for a in added]
+        msgs += [add_torrent_bytes(raw, wanted_route) for raw in files]
+        if magnets:
+            msgs.append("magnets wait for their metadata (up to the add timeout each)")
+        return "; ".join(msgs + skipped)
+    exclusive(job)
 
 
 def remove_source(sid, erase_data):
@@ -523,11 +547,24 @@ def snapshot():
         items.append({"hash": ih, "name": t["name"], "route": route, "total": t["total"], "cache": sz,
                       "pieces": f"{len(mine)}/{len(t['hs'])}", "peers": st_.get("peers", 0),
                       "tree": tree(t, files) if sz else None})
-    srcs = []
-    for s in load_sources():
+    srcs, sources = [], load_sources()
+    # in a folder shared by several torrents, a path present in more than one is served from only one of them
+    seen = {}
+    for s in sources:
+        t = tp.get(source_hash(s))
+        for p, _, _ in (t["files"] if t else []):
+            seen.setdefault((s["route"], t["name"], p), []).append(s["id"])
+    hidden = {}
+    for ids in seen.values():
+        if len(ids) > 1:
+            for i in ids:
+                hidden[i] = hidden.get(i, 0) + 1
+    for s in sources:
         h = source_hash(s)
         if h in live:
             status = "mounted"
+            if hidden.get(s["id"]):
+                status += f" ({hidden[s['id']]} files also in another torrent of this folder: one copy is served)"
         elif s["kind"] == "magnet" and h not in tp:
             status = "waiting for metadata"
         else:
@@ -571,14 +608,14 @@ button:disabled{{opacity:.4;cursor:default}}.msg{{padding:8px 10px;border:1px so
 .tree{{margin:4px 0 8px 14px}}.row{{display:flex;gap:8px;align-items:center;justify-content:space-between;padding:2px 0}}
 .row form,summary form,td form{{display:inline;margin:0}}.row button,summary button{{padding:2px 8px;font-size:13px}}
 .sz{{white-space:nowrap;color:var(--mut)}}
-input[type=text],input[type=number]{{font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg)}}
+input[type=text],input[type=number],textarea{{font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg)}}
 .add{{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:6px 0}}.add .l{{flex:1 1 380px}}.add .f{{flex:0 1 180px}}
 </style>
 <h1>Mounted torrents</h1>
-<div class=mut>Add a magnet link, the URL of a .torrent file, or a .torrent file. Adding or removing restarts the service (~10 s).</div>
+<div class=mut>Add magnet links or URLs of .torrent files (one per line, several at once is fine), or a .torrent file. Torrents with the same folder name share one folder, their files merged. Adding or removing restarts the service (once per batch).</div>
 <form class=add method=post action=/add>
-  <input class=l type=text name=link placeholder="magnet:?xt=urn:btih:…  or  https://…/file.torrent" required>
-  <input class=f type=text name=route placeholder="folder name (optional)">
+  <textarea class=l name=link rows=3 placeholder="magnet:?xt=urn:btih:…  or  https://…/file.torrent&#10;one per line" required></textarea>
+  <input class=f type=text name=route placeholder="folder (optional)" title="Folder for every link of the batch. Torrents with the same folder name are merged into one folder.">
   <button type=submit>Add</button>
 </form>
 <div class=add><span class=mut>or a file:</span> <input type=file id=file accept=".torrent"
@@ -718,14 +755,37 @@ class H(http.server.BaseHTTPRequestHandler):
             elif self.path == "/settings":
                 go(apply_settings, one("mode"), one("cache_gb") or "0", one("reserve_pct") or "20")
             elif self.path == "/add" and one("link"):
-                go(add_link, one("link"), one("route"))
+                go(add_links, one("link"), one("route"))
             elif self.path == "/remove" and re.fullmatch(r"[0-9a-f]{8}", one("id")):
                 go(remove_source, one("id"), one("erase") != "0")
         self.send_response(303); self.send_header("Location", "/"); self.end_headers()
 
 
+def watchdog():
+    """Distribyted can die on its own (a crash, a kill): report it and restart it, unless it keeps dying."""
+    crashes = []
+    while True:
+        time.sleep(5)
+        p = state.get("proc")
+        if not p or p.poll() is None or not lock.acquire(blocking=False):
+            continue
+        try:
+            if state.get("proc") is not p:
+                continue   # replaced meanwhile by a change from the page
+            crashes = [t for t in crashes if t > time.time() - 600] + [time.time()]
+            stop()
+            if len(crashes) >= 3:
+                state["state"] = f"stopped: Distribyted exited (code {p.returncode}) 3 times in 10 minutes; see the container log"
+                continue
+            state["message"] = f"Distribyted exited on its own (code {p.returncode}): restarted"
+            start()
+        finally:
+            lock.release()
+
+
 def main():
     start()
+    threading.Thread(target=watchdog, daemon=True).start()
     srv = http.server.ThreadingHTTPServer(("0.0.0.0", 8080), H)
     signal.signal(signal.SIGTERM, lambda *a: (stop(), os._exit(0)))
     srv.serve_forever()

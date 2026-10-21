@@ -107,14 +107,18 @@ The page also adds and removes torrents (top of the page, and the "Sources" tabl
 `/data/sources.json` (inside `data/state/`); on each start `admin.py` generates the Distribyted configuration from
 `core/config.yaml` (everything above `routes:`) plus that list. The first run imports the routes of `core/config.yaml`.
 
-- **Add:** a magnet link, the URL of a .torrent file, or a .torrent file chosen on the page. Optional folder name (default: the
+- **Add:** magnet links or URLs of .torrent files (one per line, several in one go: one restart for the batch), or a .torrent
+  file chosen on the page. Optional folder name (default: the
   torrent's name). One folder per torrent under the share root. A duplicate (same info-hash) is refused.
 - **Remove:** "Remove" (also erases its cached data) or "Remove, keep data". Removing a torrent does not delete the .torrent
   files shipped in `/torrents` (read-only), only the ones added through the page.
 - **Magnets and the cache:** Distribyted keeps no metadata for magnets, so a local patch (`core/patches/metainfo_dump.go`) saves the
   metadata of every torrent as soon as it is obtained, to `/data/metainfo/<info-hash>.torrent`. That lets the page attribute a
   magnet's cached pieces to it (shown in the tree, erasable, removed with the torrent). Before this, magnet pieces were
-  "unknown" and only "Erase everything" removed them.
+  "unknown" and only "Erase everything" removed them. The same file also starts the magnet afterwards: once it is saved (and
+  parses to the right info-hash), the generated configuration uses it as `torrent_path` instead of the magnet link. Measured
+  with 64 torrents (62 magnets): about 2 minutes to mount when every magnet was looked up again at each start, 3 s from the
+  saved files.
 - **Safety of the URL option:** the page is open on the local network, so a URL is fetched only if it is http(s) and its host
   (and every redirect) resolves to a public address; at most 10 MB; the content is parsed as a torrent before being kept.
   A URL on the local network was refused.
@@ -122,9 +126,43 @@ The page also adds and removes torrents (top of the page, and the "Sources" tabl
   a magnet of the same Debian torrent refused as a duplicate; an invalid magnet refused; a real magnet (Sintel, CC-BY) resolved
   and mounted within seconds, 11 files in a real sub-folder, its cache attributed (131 kB, "unknown" stayed 0), and its removal
   erased exactly its pieces and its saved metadata. The test torrents were then removed.
-- **Limits:** every add/remove restarts the service (~10 s). Each magnet whose metadata cannot be found delays the mount by
-  `add_timeout` (45 s in `core/config.yaml`) at every start. Folder names are sanitised (`A-Z a-z 0-9 . _ -`). No progress display for
+- **Limits:** every add/remove restarts the service (~10 s). Each magnet whose metadata has never been found delays the mount
+  by `add_timeout` (45 s in `core/config.yaml`) at every start, until it is found once. Folder names are sanitised (`A-Z a-z 0-9 . _ -`). No progress display for
   a download; no way to rename a folder (remove and add again).
+
+## Many torrents: two Distribyted bugs (2026-10-21)
+
+Adding 62 magnets at once (64 torrents in all) exposed two bugs in Distribyted v0.15.0, both patched in `core/Dockerfile`:
+- **Crash at start-up:** `fatal error: concurrent map read and map write` in `fs/storage.go`. `Torrent.load()` filled its file
+  table under a *read* lock, so two first accesses at the same time (start-up and a FUSE request) wrote the same map. The
+  longer load with many torrents makes the overlap likely. Patch `core/patches/torrent_load_lock.patch`: write lock in
+  `load()`, read lock in `Open`/`ReadDir`.
+- **Folders that cannot be opened:** a path was routed to the first filesystem whose name it merely *starts with*, so
+  `name-13` could be served by `name-1` or `name` (Go map order is random): 38 of the 64 folders listed but failed with
+  "No such file or directory". Patch `core/patches/fs_prefix_match.patch`: a path belongs to a filesystem only if it is that
+  path or lies under it. This affects any two folder names where one starts the other, not only batches.
+- **The page said "running" over a dead process.** `admin.py` now has a watchdog: if Distribyted exits on its own it says so and
+  restarts it, and gives up after 3 exits in 10 minutes. Checked by killing the process (`kill -9`): restarted, all mounted.
+
+After the patches: 64/64 mounted, every top-level folder opens, no crash over several restarts.
+
+## Several torrents in one folder (2026-10-21)
+
+A collection split into many torrents (here 62 parts, all named `BigCollection`, all starting with the same directories)
+was served as 62 folders `BigCollection`, `BigCollection-2`… Distribyted can serve several torrents in one route and
+overlays their file trees, so:
+- **A new source joins an existing folder of the same name** instead of getting a `-2` suffix. The folder name is the one typed
+  on the page (it applies to the whole batch), otherwise the torrent's name (`dn=` for a magnet, 8 characters of the hash
+  without it). Same name means merged, whatever the content: two unrelated torrents with the same generic name are merged too.
+- **Same path in two torrents of a folder:** Distribyted serves only one of them (the first loaded, which is not stable). The
+  page counts these on the source's line. The 62 parts here share no path (4,834 distinct paths, about 836 GB).
+- **No doubled name:** a multi-file torrent served in a folder named after it showed `BigCollection/BigCollection/…`.
+  Patch `core/patches/flatten_named_folder.patch`: when the folder's name is the torrent's name (sanitised like `admin.py`
+  does), the torrent's own top-level directory is skipped. A folder with another name keeps it (`librivox/1601_0903_librivox/…`).
+- A source cannot be moved to another folder from the page: remove it ("Remove, keep data") and add it again with the name.
+
+Measured: 64/64 mounted; `BigCollection/T-En Collection` holds 61 sub-folders coming from different torrents; a file
+read twice gives the same checksum; the Samba container sees the same tree.
 
 ## Cache cap and disk space (2026-10-21)
 
