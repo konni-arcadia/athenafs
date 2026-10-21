@@ -8,7 +8,7 @@ http:
 torrent:
   global_cache_size: 2048        # MB: disk space limit, the least recently read data is dropped
   metadata_folder: /data/metadata
-  add_timeout: 45                # seconds to get a magnet's metadata (each unresolved magnet delays the mount by this much)
+  add_timeout: 10                # seconds the mount waits for a magnet's metadata (in parallel; a late one is added when it arrives)
   read_timeout: 60               # a stuck read returns an error instead of freezing the client
   continue_when_add_timeout: true
 fuse:

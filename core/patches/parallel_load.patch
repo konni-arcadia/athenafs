@@ -1,0 +1,98 @@
+diff --git a/fs/torrent.go b/fs/torrent.go
+index 77664fe..f0bb362 100644
+--- a/fs/torrent.go
++++ b/fs/torrent.go
+@@ -22,11 +22,14 @@ type Torrent struct {
+ }
+ 
+ func NewTorrent(readTimeout int) *Torrent {
+-	return &Torrent{
++	t := &Torrent{
+ 		s:           newStorage(SupportedFactories),
+ 		ts:          make(map[string]*torrent.Torrent),
+ 		readTimeout: readTimeout,
+ 	}
++	// a folder whose torrents are still being added (in the background) must exist, empty, not be "no such file"
++	t.s.Clear()
++	return t
+ }
+ 
+ func (fs *Torrent) AddTorrent(t *torrent.Torrent) {
+diff --git a/torrent/service.go b/torrent/service.go
+index 1954ffb..4d24f04 100644
+--- a/torrent/service.go
++++ b/torrent/service.go
+@@ -62,32 +62,57 @@ func (s *Service) Load() (map[string]fs.Filesystem, error) {
+ }
+ 
+ func (s *Service) load(l loader.Loader) error {
+-	list, err := l.ListMagnets()
++	magnets, err := l.ListMagnets()
+ 	if err != nil {
+ 		return err
+ 	}
+-	for r, ms := range list {
+-		s.addRoute(r)
+-		for _, m := range ms {
+-			if err := s.addMagnet(r, m); err != nil {
+-				return err
+-			}
+-		}
+-	}
+-
+-	list, err = l.ListTorrentPaths()
++	paths, err := l.ListTorrentPaths()
+ 	if err != nil {
+ 		return err
+ 	}
+-	for r, ms := range list {
++
++	// Torrents are added in parallel (bounded) and in the background. One by one, each unknown magnet delayed the mount by up to add_timeout
++	// and each .torrent file took a fraction of a second (hundreds of them: minutes). Routes are created first: that part
++	// is not thread-safe.
++	for r := range magnets {
+ 		s.addRoute(r)
+-		for _, p := range ms {
+-			if err := s.addTorrentPath(r, p); err != nil {
+-				return err
++	}
++	for r := range paths {
++		s.addRoute(r)
++	}
++	var wg sync.WaitGroup
++	var errMu sync.Mutex
++	var firstErr error
++	sem := make(chan struct{}, 128)
++	run := func(add func(r, v string) error, list map[string][]string) {
++		for r, vs := range list {
++			for _, v := range vs {
++				wg.Add(1)
++				go func(r, v string) {
++					defer wg.Done()
++					sem <- struct{}{}
++					defer func() { <-sem }()
++					if err := add(r, v); err != nil {
++						errMu.Lock()
++						if firstErr == nil {
++							firstErr = err
++						}
++						errMu.Unlock()
++					}
++				}(r, v)
+ 			}
+ 		}
+ 	}
+-
++	run(s.addMagnet, magnets)
++	run(s.addTorrentPath, paths)
++	// Do not wait: the mount starts now and each folder fills in as its torrents are added (hundreds of torrents with
++	// small pieces take minutes to add, the client serialises part of the work).
++	go func() {
++		wg.Wait()
++		if firstErr != nil {
++			s.log.Error().Err(firstErr).Msg("some torrents could not be added")
++		}
++	}()
+ 	return nil
+ }
+ 

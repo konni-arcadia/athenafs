@@ -26,18 +26,32 @@ sh scripts/down.sh        # stops everything and releases the host mount point
 ```
 
 ## The web page
-- **Add** a magnet link, the URL of a .torrent file, or a .torrent file; **remove** with or without erasing its cached data.
+- **Add** magnet links or URLs of .torrent files (one per line, a whole batch at once), or a .torrent file; **remove** with or
+  without erasing its cached data. Torrents with the same folder name share one folder.
+- **Folders**: one line per folder of the share; **Rename** a folder (an existing name merges them) or **Move** one torrent.
+- **Activity**: download and upload rates per torrent, and the files that received data in the last 30 s.
+- **Search** over every file name of every torrent (built from the .torrent files, nothing is downloaded), with each file's
+  state: cached, partial, not cached, downloading, queued or caching. A folder in a result lists everything under it
+  (`folder:path`); **Cache** reads a file, or all the results, into the cache ahead of time (refused when larger than the
+  cache cap). Progress and **Cancel all** are under Activity.
 - **Cache**: what is stored per torrent, as a tree of files and folders, with **Erase** on a file, a folder, a whole torrent,
   or everything. A piece shared with a neighbouring file that is not chosen is kept, and the page says so.
 - **Cache cap**: shows the free disk space and the largest cap that is possible now. The cap is either fixed (in GB) or
   automatic (keep a percentage of the disk free, computed at each start).
-- Every change restarts the core service (~10 s): the mounts are unavailable meanwhile and reads in progress fail.
+- Every change restarts the core service (a few seconds): the mounts are unavailable meanwhile and reads in progress fail.
+  With hundreds of torrents the folders then fill in over a few minutes.
+- **API** (JSON): `GET /api` (status, sources, cache), `GET /api/activity` (rates, files receiving data),
+  `GET /api/search?q=words&limit=50&offset=0` (or `q=folder:path`), `POST /api/prefetch` with `path=…` (repeatable) or
+  `q=…`, `POST /api/prefetch/cancel`. POST requests need an `Origin` header naming the page's host (anti-CSRF), e.g.
+  `curl -H 'Origin: http://localhost:8080' --data-urlencode 'path=folder/file' http://localhost:8080/api/prefetch`.
 - There is **no authentication**. By default it listens on `127.0.0.1`; `ATHENAFS_BIND=0.0.0.0` opens it to the local network,
   where anyone can add torrents and erase the cache. POST requests must come from the page itself (anti-CSRF).
   A URL given to the page is fetched only if it is http(s) and resolves to public addresses.
 
 ## The SMB share
 Read-only, one share `torrents`, account `tor` / `rent` by default (test credentials: set `SMB_USER` and `SMB_PASS`).
+Its root also holds two links to the web page (`.webloc` for macOS, `.url` for Windows); set `ATHENAFS_PAGE_URL` in `.env`
+if `http://<this host>.local:<port>/` is not how the network reaches it.
 By default it listens on `127.0.0.1` only; `SMB_BIND=0.0.0.0` shares it on the local network.
 - Mac: `mount_smbfs //tor:rent@<host>/torrents <dir>`, or Finder > Go > Connect to Server > `smb://<host>/torrents`.
 - Windows: `net use \\<host>\torrents /user:tor rent`, or the Explorer address bar.
@@ -65,6 +79,9 @@ data/                  runtime data, not in git: torrents/ (optional .torrent fi
 - Read-ahead is wide: a few times more data can be received than is read.
 - Finder and Windows Explorer themselves (previews, thumbnails) were not tested, only equivalent commands.
 - The patches to Distribyted are local; they are not proposed upstream yet.
+- Hundreds of torrents work but cost: every torrent announces on its own (DHT and trackers) behind one client lock. With 526,
+  adding them all takes about 1.5 minutes after each restart (the folders fill in meanwhile), and the core then uses
+  about 15 % of a core and 4.8 GB of memory.
 
 ## Licence
 Not chosen yet. Distribyted is GPL-3.0, and the patches in `core/` are derivative work of it, so any publication must be

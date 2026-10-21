@@ -156,13 +156,65 @@ overlays their file trees, so:
   without it). Same name means merged, whatever the content: two unrelated torrents with the same generic name are merged too.
 - **Same path in two torrents of a folder:** Distribyted serves only one of them (the first loaded, which is not stable). The
   page counts these on the source's line. The 62 parts here share no path (4,834 distinct paths, about 836 GB).
-- **No doubled name:** a multi-file torrent served in a folder named after it showed `BigCollection/BigCollection/…`.
-  Patch `core/patches/flatten_named_folder.patch`: when the folder's name is the torrent's name (sanitised like `admin.py`
-  does), the torrent's own top-level directory is skipped. A folder with another name keeps it (`librivox/1601_0903_librivox/…`).
-- A source cannot be moved to another folder from the page: remove it ("Remove, keep data") and add it again with the name.
+- **No doubled name:** a multi-file torrent showed its own top-level directory inside its folder
+  (`BigCollection/BigCollection/…`). Patch `core/patches/flatten_single_root.patch`: when every torrent of a folder is a
+  multi-file torrent with the same top-level directory (one torrent, or a collection in parts), that level is skipped,
+  whatever the folder is called (a first version compared the folder's name with the torrent's, which a rename would have
+  broken). A folder holding torrents with different roots keeps one sub-folder per root. `admin.py` (`share_path`) applies
+  the same rule for the paths it shows.
+- **Rename and move:** "Rename" on a folder renames it in the share (one restart); a name that already exists merges the two.
+  "Move" on one torrent puts it in another folder. A renamed folder leaves a forwarding entry (`/data/aliases.json`): a torrent
+  added later without a folder name, whose own name is the old one, goes to the new folder, so the next parts of a renamed
+  collection join it. A folder name typed on the page is taken as is.
 
 Measured: 64/64 mounted; `BigCollection/T-En Collection` holds 61 sub-folders coming from different torrents; a file
 read twice gives the same checksum; the Samba container sees the same tree.
+
+## Hundreds of torrents (2026-10-21)
+
+With 526 sources (524 parts of one collection), starting was the problem, not serving:
+- Distribyted added the torrents of its configuration **one by one, before mounting anything**. Each unknown magnet waited
+  up to `add_timeout`, each .torrent file took a fraction of a second: 462 new magnets meant tens of minutes without a share,
+  and 520 known torrents about 100 s.
+  Patch `core/patches/parallel_load.patch`: added in parallel (128 at a time) **and in the background**; the share is mounted
+  at once and each folder fills in as its torrents arrive. The same patch makes an empty folder exist (empty) instead of
+  "No such file or directory" while it waits.
+- A magnet still without metadata after `add_timeout` was dropped until the next restart. Patch
+  `core/patches/late_metadata.patch`: it keeps waiting in the background and joins its folder when the metadata arrives
+  (measured: 107 magnets arrived late this way, 520/526 without a restart). `add_timeout` is now 10 s.
+- **The real limit is the BitTorrent client.** Every torrent runs its own DHT announcer and one scraper per tracker, all
+  behind the client's single lock. Goroutine dump with 526 torrents: 486 DHT announcers and about 300 tracker tasks waiting
+  for that lock. Adding them all then takes about 1.5 minutes after each start (the stats call takes seconds meanwhile, and
+  the container uses about 1.7 cores); at rest it uses about 15 % of a core and 4.8 GB of memory. Nothing is wrong, it is just a lot of torrents for one client. Not solved: the way out
+  would be to keep idle torrents quiet (no announce until a file of theirs is read), which is a deeper change.
+- The supervisor got slow with them too (9 s per refresh): magnet links were parsed again at every refresh and conflicts
+  recomputed over every file. Both are cached now (0.14 s). The page lists at most 200 torrents per folder (all are in `/api`).
+
+## Activity, search and other page features (2026-10-21)
+
+- **Rates:** Distribyted's per-torrent figures are deltas between two API calls, reset by every caller, and report 0 peers
+  when `/status` was called less than 2 s before `/routes`. Patch `core/patches/stats_totals.patch` adds cumulative byte
+  counters and always fills peers; `admin.py` samples them every 2 s (it is the only regular caller) and computes the rates.
+- **Files receiving data:** each new piece in the cache is mapped to its torrent and file(s) (a piece can span several);
+  the page and `/api/activity` list the files that received data in the last 30 s. Measured: a 311 MB read at about
+  17 MB/s from 14 peers, the right file shown, plus the neighbour sharing its first piece.
+- **Search:** SQLite FTS5 with the trigram tokenizer (`/data/search.db`), built from the .torrent files only: nothing is
+  downloaded, archives are not opened. Reindexed per torrent when one is added, removed, moved, or when its layout changes.
+  Substring match, every word must match, case-insensitive; a word shorter than 3 characters falls back to a plain scan.
+  Synthetic test with 2 million paths: indexing 31 s (421 MB), a precise query 5 to 20 ms, a broad one (125,000 matches,
+  count capped at 10,000) about 0.4 s, a short-word scan about 0.5 s. `GET /api/search?q=…&limit=…&offset=…`.
+- **State in the search and "add to cache":** each result says cached / partial (pieces present over pieces covering the
+  file) / not cached, or downloading (pieces arrived in the last 30 s), queued or caching. "Cache" reads the file through the
+  mount in the supervisor (2 readers, 1 MB reads, 3 attempts), so Distribyted downloads it as for any client; no patch.
+  A batch (a file, every result of a search, or `folder:path`) is refused when it would not fit in 90 % of the cache cap:
+  its first files would be evicted before the last are read. Measured: a 188 MB file cached in about 90 s, then read again
+  while the container received under 1 MB (background traffic of 520 torrents). `folder:BigCollection` (first 10,000
+  files, 2.8 TB) refused against a 478 GB cap.
+- **Links at the root of the share:** `athenafs web page.webloc` (macOS) and `athenafs web page.url` (Windows), pointing to
+  `ATHENAFS_PAGE_URL` (by default `http://<this host>.local:<port>/`, set by `scripts/up.sh`). Distribyted serves the files
+  of `$DISTRIBYTED_ROOT_FILES` at the root of the mount (`core/patches/root_files.go`), read at each start.
+- **Build:** Go modules are downloaded in their own layer before the patches; two builds had failed on a DNS/IPv6 hiccup of
+  the host while downloading them.
 
 ## Cache cap and disk space (2026-10-21)
 

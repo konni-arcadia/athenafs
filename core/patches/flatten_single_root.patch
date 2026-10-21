@@ -1,0 +1,36 @@
+diff --git a/fs/torrent.go b/fs/torrent.go
+index 77664fe..a9d7bfc 100644
+--- a/fs/torrent.go
++++ b/fs/torrent.go
+@@ -60,14 +60,30 @@ func (fs *Torrent) load() {
+ 		return
+ 	}
+ 
++	// When every torrent of this folder is a multi-file torrent with the same top-level directory (a collection split in
++	// parts, or a single torrent), that directory is skipped: folder/T-En Collection/... instead of folder/Name/T-En Collection/...
++	roots := map[string]bool{}
+ 	for _, t := range fs.ts {
+ 		<-t.GotInfo()
++		if len(t.Info().Files) == 0 {
++			roots[""] = true // a single-file torrent: nothing to skip, and keep the others' directories
++		} else {
++			roots[t.Info().BestName()] = true
++		}
++	}
++	flatten := len(roots) == 1 && !roots[""]
++
++	for _, t := range fs.ts {
+ 		for _, file := range t.Files() {
++			p := file.Path()
++			if flatten {
++				p = file.DisplayPath()
++			}
+ 			fs.s.Add(&torrentFile{
+ 				readerFunc: file.NewReader,
+ 				len:        file.Length(),
+ 				timeout:    fs.readTimeout,
+-			}, file.Path())
++			}, p)
+ 		}
+ 	}
+ 

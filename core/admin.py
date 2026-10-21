@@ -9,7 +9,7 @@ in its .torrent file (for a magnet, in the metadata that the patched Distribyted
 The torrents served are kept in /data/sources.json; the Distribyted configuration actually used is generated from the base
 configuration (/config/config.yaml, everything above `routes:`) plus those sources.
 """
-import base64, bisect, hashlib, hmac, html, http.server, ipaddress, json, os, re, secrets, shutil, signal, socket, subprocess
+import base64, bisect, collections, functools, hashlib, sqlite3, hmac, html, http.server, ipaddress, json, os, re, secrets, shutil, signal, socket, subprocess
 import threading, time, urllib.error, urllib.parse, urllib.request
 
 CFG = os.environ.get("DISTRIBYTED_CONFIG", "/config/config.yaml")
@@ -18,9 +18,11 @@ CACHE = f"{DATA}/cache/completed"
 COMPL = f"{DATA}/piece-completion"
 SEEDS = "/torrents"                    # read-only .torrent files shipped with the setup
 ADDED = "/data/torrents-added"         # .torrent files added through the page
+INDEX = "/data/search.db"              # file-name index for the search (rebuilt from the .torrent files if deleted)
 METAINFO = os.environ.get("DISTRIBYTED_METAINFO_DIR", "/data/metainfo")   # metadata of resolved magnets
 SOURCES = "/data/sources.json"
 SETTINGS = "/data/settings.json"
+ALIASES = "/data/aliases.json"         # renamed folder -> its new name, followed by later adds
 GENERATED = "/data/config.generated.yaml"
 API = "http://127.0.0.1:4444/api"
 MOUNT = "/mnt/torrents/fs"
@@ -77,13 +79,16 @@ def parse_torrent(raw):
         total = off
     else:
         fl, total = [(info[b"name"].decode("utf-8", "replace"), 0, info[b"length"])], info[b"length"]
-    return {"hash": ih, "name": info[b"name"].decode("utf-8", "replace"), "total": total, "hs": set(plist),
+    return {"hash": ih, "name": info[b"name"].decode("utf-8", "replace"), "total": total, "hs": set(plist), "multi": b"files" in info,
             "plist": plist, "pl": info[b"piece length"], "files": fl}
+
+
+_parsed = {}   # path -> (mtime, size, parsed torrent): a .torrent is parsed again only when it changes
 
 
 def torrent_pieces():
     """info-hash (hex) -> parsed torrent, for every known .torrent (shipped, added, or saved from a magnet)."""
-    out = {}
+    out, seen = {}, set()
     for d in (SEEDS, ADDED, METAINFO):
         try:
             names = sorted(os.listdir(d))
@@ -92,15 +97,47 @@ def torrent_pieces():
         for fn in names:
             if not fn.endswith(".torrent"):
                 continue
+            path = os.path.join(d, fn); seen.add(path)
             try:
-                t = parse_torrent(open(os.path.join(d, fn), "rb").read())
-                t["fn"] = os.path.join(d, fn)
-                out.setdefault(t["hash"], t)
+                st = os.stat(path)
+                c = _parsed.get(path)
+                if not c or c[:2] != (st.st_mtime, st.st_size):
+                    t = parse_torrent(open(path, "rb").read())
+                    t["fn"] = path
+                    t["offsets"] = [o for _, o, _ in t["files"]]
+                    c = _parsed[path] = (st.st_mtime, st.st_size, t)
+                out.setdefault(c[2]["hash"], c[2])
             except Exception as e:  # unreadable file: ignore it
                 print("unreadable torrent", fn, e)
+    for path in set(_parsed) - seen:
+        del _parsed[path]
     return out
 
 
+def flat_folders(tp, sources=None):
+    """folder -> True when its torrents' own top-level directory is skipped in the share: every torrent of the folder is a
+    multi-file torrent with the same top-level name (same rule as core/patches/flatten_single_root.patch)."""
+    roots = {}
+    for s in load_sources() if sources is None else sources:
+        t = tp.get(source_hash(s))
+        if t:
+            roots.setdefault(s["route"], set()).add(t["name"] if t["multi"] else None)
+    return {r: len(n) == 1 and None not in n for r, n in roots.items()}
+
+
+def share_path(route, t, path, flat):
+    """Where a file of torrent t appears in the share."""
+    if t["multi"] and not flat:
+        return f"{route}/{t['name']}/{path}"
+    return f"{route}/{path}" if t["multi"] else f"{route}/{t['name']}"
+
+
+@functools.lru_cache(maxsize=100_000)
+def magnet_dn(uri):
+    return urllib.parse.parse_qs(uri[8:]).get("dn", [""])[0]
+
+
+@functools.lru_cache(maxsize=100_000)
 def magnet_hash(uri):
     """Info-hash (hex) of a magnet link, or None if it is not a valid btih magnet."""
     if not uri.startswith("magnet:?"):
@@ -164,10 +201,54 @@ def save_sources(sources):
     os.replace(tmp, SOURCES)
 
 
-def route_for(wanted):
+def load_aliases():
+    try:
+        return json.load(open(ALIASES))
+    except (OSError, ValueError):
+        return {}
+
+
+def route_for(wanted, explicit=False):
     """Folder of a new source. A folder that already exists is joined, not renamed: torrents with the same folder name are
-    served merged in one folder (Distribyted overlays the file trees of the torrents of a route)."""
-    return sanitize(wanted)
+    served merged in one folder (Distribyted overlays the file trees of the torrents of a route). A name that was not typed
+    on the page (the torrent's own name) follows the renames made since, so a later part of a renamed collection joins it."""
+    r = sanitize(wanted)
+    if not explicit:
+        aliases, seen = load_aliases(), set()
+        while r in aliases and r not in seen:
+            seen.add(r); r = aliases[r]
+    return r
+
+
+def rename(new, route="", sid=""):
+    """Rename a folder (route) or move one source (sid) to another folder. An existing name merges. Restarts the service."""
+    new = sanitize(new)
+    srcs = load_sources()
+    moving = [s for s in srcs if (s["route"] == route if route else s["id"] == sid)]
+    if not moving:
+        state["message"] = "unknown folder or source: nothing renamed"; return
+    old = moving[0]["route"]
+    if all(s["route"] == new for s in moving):
+        state["message"] = f"already in {new}"; return
+    merged = any(s["route"] == new for s in srcs if s not in moving)
+
+    def job():
+        ids = {s["id"] for s in moving}
+        cur = load_sources()
+        for s in cur:
+            if s["id"] in ids:
+                s["route"] = new
+        save_sources(cur)
+        if route:   # a whole folder: later adds of the old name follow
+            a = {k: (new if v == old else v) for k, v in load_aliases().items()}
+            a[old] = new
+            a.pop(new, None)
+            with open(ALIASES + ".tmp", "w") as f:
+                json.dump({k: v for k, v in a.items() if k != v}, f, indent=1)
+            os.replace(ALIASES + ".tmp", ALIASES)
+            return f"{'merged' if merged else 'renamed'} folder {old} {'into' if merged else 'to'} {new}"
+        return f"moved a torrent from {old} to {'the existing folder ' if merged else ''}{new}"
+    exclusive(job)
 
 
 def saved_metainfo(h):
@@ -257,20 +338,41 @@ def effective_cap_mb(st):
 
 def cache_files():
     try:
-        return {h: os.path.getsize(os.path.join(CACHE, h)) for h in os.listdir(CACHE)}
+        return {e.name: e.stat().st_size for e in os.scandir(CACHE)}
     except OSError:
         return {}
 
 
-def api(path):
+def api(path, timeout=3):
     try:
-        with urllib.request.urlopen(API + path, timeout=3) as r:
+        with urllib.request.urlopen(API + path, timeout=timeout) as r:
             return json.load(r)
     except Exception:
         return None
 
 
+ROOT_FILES = os.environ.get("DISTRIBYTED_ROOT_FILES", "/data/share-root")
+PAGE_URL = os.environ.get("ATHENAFS_PAGE_URL", "")
+
+
+def write_root_files():
+    """Links to this page at the root of the share: .webloc opens in macOS, .url in Windows."""
+    os.makedirs(ROOT_FILES, exist_ok=True)
+    for fn in os.listdir(ROOT_FILES):
+        os.remove(os.path.join(ROOT_FILES, fn))
+    if not PAGE_URL.startswith(("http://", "https://")):
+        return
+    u = html.escape(PAGE_URL)
+    with open(os.path.join(ROOT_FILES, "athenafs web page.webloc"), "w") as f:
+        f.write('<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
+                '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict><key>URL</key>'
+                f'<string>{u}</string></dict></plist>\n')
+    with open(os.path.join(ROOT_FILES, "athenafs web page.url"), "w", newline="\r\n") as f:
+        f.write(f"[InternetShortcut]\nURL={PAGE_URL}\n")
+
+
 def start():
+    write_root_files()
     generate_config(load_sources())
     state["proc"] = subprocess.Popen(["/bin/distribyted", "--config", GENERATED, "--http-port", "4444"])
     state["state"] = "running"
@@ -421,7 +523,7 @@ def fetch_torrent(url):
     return data
 
 
-def add_torrent_bytes(raw, wanted_route=""):
+def add_torrent_bytes(raw, wanted_route="", explicit=False):
     """Add a .torrent file (bytes). Returns the message."""
     try:
         t = parse_torrent(raw)
@@ -435,7 +537,7 @@ def add_torrent_bytes(raw, wanted_route=""):
     fn = os.path.join(ADDED, sid + ".torrent")
     with open(fn, "wb") as f:
         f.write(raw)
-    sources.append({"id": sid, "route": route_for(wanted_route or t["name"]), "kind": "file", "value": fn})
+    sources.append({"id": sid, "route": route_for(wanted_route or t["name"], explicit), "kind": "file", "value": fn})
     save_sources(sources)
     return f"added: {t['name']} ({t['total'] / 1e6:.0f} MB)"
 
@@ -466,12 +568,12 @@ def add_links(text, wanted_route=""):
     def job():
         srcs, added = load_sources(), []
         for link, h, dn in magnets:
-            srcs.append({"id": secrets.token_hex(4), "route": route_for(wanted_route or dn or h[:8]),
+            srcs.append({"id": secrets.token_hex(4), "route": route_for(wanted_route or dn or h[:8], bool(wanted_route)),
                          "kind": "magnet", "value": link})
             added.append(dn or h[:8])
         save_sources(srcs)
         msgs = [f"added magnet {a}" for a in added]
-        msgs += [add_torrent_bytes(raw, wanted_route) for raw in files]
+        msgs += [add_torrent_bytes(raw, wanted_route, bool(wanted_route)) for raw in files]
         if magnets:
             msgs.append("magnets wait for their metadata (up to the add timeout each)")
         return "; ".join(msgs + skipped)
@@ -533,13 +635,34 @@ def tree(t, files):
     return root
 
 
+_hidden = {"key": None, "value": {}}
+
+
+def hidden_files(key, tp):
+    """source id -> number of its files whose path is also in another torrent of the same folder (one copy is served).
+    Recomputed only when the sources change."""
+    if key != _hidden["key"]:
+        seen = {}
+        for sid, route, h in key:
+            t = tp[h]
+            for p, _, _ in t["files"]:
+                seen.setdefault((route, t["name"], p), []).append(sid)
+        hidden = {}
+        for ids in seen.values():
+            if len(ids) > 1:
+                for i in ids:
+                    hidden[i] = hidden.get(i, 0) + 1
+        _hidden.update(key=key, value=hidden)
+    return _hidden["value"]
+
+
 def snapshot():
-    tp = torrent_pieces(); files = cache_files()
-    routes = api("/routes") or []
-    live = {t["hash"]: (r["name"], t) for r in routes for t in r.get("torrentStats", [])}
+    tp = torrent_pieces(); files = cache_files(); cached = set(files)
+    routes = activity["routes"] if time.time() - activity["at"] < 130 else (api("/routes") or [])
+    live = {t["hash"]: (r["name"], t) for r in routes for t in (r.get("torrentStats") or [])}
     items = []
     for ih, t in tp.items():
-        mine = t["hs"] & set(files)
+        mine = t["hs"] & cached
         sz = sum(files[h] for h in mine)
         route, st_ = live.get(ih, ("?", {}))
         if route == "?" and sz == 0:
@@ -549,16 +672,7 @@ def snapshot():
                       "tree": tree(t, files) if sz else None})
     srcs, sources = [], load_sources()
     # in a folder shared by several torrents, a path present in more than one is served from only one of them
-    seen = {}
-    for s in sources:
-        t = tp.get(source_hash(s))
-        for p, _, _ in (t["files"] if t else []):
-            seen.setdefault((s["route"], t["name"], p), []).append(s["id"])
-    hidden = {}
-    for ids in seen.values():
-        if len(ids) > 1:
-            for i in ids:
-                hidden[i] = hidden.get(i, 0) + 1
+    hidden = hidden_files(tuple((s["id"], s["route"], source_hash(s)) for s in sources if source_hash(s) in tp), tp)
     for s in sources:
         h = source_hash(s)
         if h in live:
@@ -570,7 +684,8 @@ def snapshot():
         else:
             status = "not mounted"
         srcs.append({"id": s["id"], "route": s["route"], "kind": s["kind"], "hash": h, "status": status,
-                     "name": tp[h]["name"] if h in tp else (urllib.parse.parse_qs(s["value"][8:]).get("dn", [""])[0] if s["kind"] == "magnet" else "")})
+                     "size": tp[h]["total"] if h in tp else 0,
+                     "name": tp[h]["name"] if h in tp else (magnet_dn(s["value"]) if s["kind"] == "magnet" else "")})
     st = api("/status") or {}
     total_d, free_d = disk()
     unknown = sum(files.values()) - sum(i["cache"] for i in items)
@@ -590,64 +705,144 @@ def network():
         return 0, 0
 
 
+def rate(n):
+    return "0" if n < 1e3 else f"{n / 1e3:.0f} kB/s" if n < 1e6 else f"{n / 1e6:.1f} MB/s"
+
+
 def mb(n):
     return f"{n / 1e6:,.0f} MB".replace(",", " ") if n < 1e9 else f"{n / 1e9:.2f} GB"
 
 
 PAGE = """<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
-<title>Mounted torrents: status</title>
+<title>athenafs</title>
 <style>
-:root{{--bg:#fff;--fg:#1a1a1a;--mut:#666;--line:#ddd;--acc:#b3261e}}
-@media (prefers-color-scheme:dark){{:root{{--bg:#16181a;--fg:#e8e8e8;--mut:#9a9a9a;--line:#33373a;--acc:#ff8a80}}}}
-body{{background:var(--bg);color:var(--fg);font:15px/1.45 system-ui,sans-serif;margin:0;padding:16px;max-width:980px;margin:auto}}
-h1{{font-size:20px;margin:0 0 4px}}h2{{font-size:16px;margin:20px 0 4px}}.mut{{color:var(--mut)}}
-table{{width:100%;border-collapse:collapse;margin:8px 0 16px}}th,td{{text-align:left;padding:8px 6px;border-bottom:1px solid var(--line);vertical-align:top}}
-td.n{{text-align:right;white-space:nowrap}}button{{font:inherit;padding:6px 10px;border:1px solid var(--acc);color:var(--acc);background:none;border-radius:6px;cursor:pointer}}
-button:disabled{{opacity:.4;cursor:default}}.msg{{padding:8px 10px;border:1px solid var(--line);border-radius:6px;margin:8px 0}}
-.wrap{{overflow-x:auto}}details{{margin:2px 0}}summary{{cursor:pointer}}
+:root{{--bg:#f6f7f9;--card:#fff;--fg:#1b1d21;--mut:#6b7079;--line:#e3e5ea;--acc:#2f5bd3;--warn:#b3261e;--ok:#1e7d43;--chip:#eef1f6}}
+@media (prefers-color-scheme:dark){{:root{{--bg:#111315;--card:#1a1d20;--fg:#e6e7e9;--mut:#9aa0a8;--line:#2c3035;--acc:#8fb0ff;--warn:#ff8a80;--ok:#6fd49a;--chip:#252a30}}}}
+*{{box-sizing:border-box}}
+body{{background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;margin:0;padding:16px}}
+.page{{max-width:1040px;margin:auto}}
+header{{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:4px 0 14px}}
+h1{{font-size:22px;margin:0;letter-spacing:-.01em}}h2{{font-size:15px;margin:0 0 10px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut)}}
+.pill{{padding:2px 10px;border-radius:99px;font-size:13px;background:var(--chip)}}.pill.ok{{color:var(--ok)}}.pill.busy{{color:var(--warn)}}
+.card{{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin:0 0 14px}}
+.tiles{{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin:0 0 14px}}
+.tile{{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 14px}}
+.tile b{{display:block;font-size:20px;font-weight:600;font-variant-numeric:tabular-nums}}.tile span{{color:var(--mut);font-size:13px}}
+.mut{{color:var(--mut)}}.small{{font-size:13px}}
+table{{width:100%;border-collapse:collapse}}th,td{{text-align:left;padding:8px 6px;border-bottom:1px solid var(--line);vertical-align:top}}
+tr:last-child>td{{border-bottom:0}}th{{font-size:13px;color:var(--mut);font-weight:500}}
+td.n,th.n{{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}}
+button{{font:inherit;font-size:14px;padding:5px 10px;border:1px solid var(--line);color:var(--fg);background:var(--card);border-radius:7px;cursor:pointer}}
+button:hover{{border-color:var(--acc)}}button.primary{{background:var(--acc);border-color:var(--acc);color:#fff}}
+button.danger{{color:var(--warn)}}button.danger:hover{{border-color:var(--warn)}}button:disabled{{opacity:.4;cursor:default}}
+.msg{{padding:10px 14px;border-left:3px solid var(--acc);background:var(--card);border-radius:6px;margin:0 0 14px}}
+.wrap{{overflow-x:auto}}details>summary{{cursor:pointer}}
 .tree{{margin:4px 0 8px 14px}}.row{{display:flex;gap:8px;align-items:center;justify-content:space-between;padding:2px 0}}
-.row form,summary form,td form{{display:inline;margin:0}}.row button,summary button{{padding:2px 8px;font-size:13px}}
+.row form,summary form,td form{{display:inline;margin:0}}.row button,summary button,td button{{padding:2px 8px;font-size:13px}}
 .sz{{white-space:nowrap;color:var(--mut)}}
-input[type=text],input[type=number],textarea{{font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg)}}
+input[type=text],input[type=number],input[type=search],textarea{{font:inherit;padding:7px 9px;border:1px solid var(--line);border-radius:7px;background:var(--bg);color:var(--fg)}}
 .add{{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:6px 0}}.add .l{{flex:1 1 380px}}.add .f{{flex:0 1 180px}}
+.bar{{height:4px;background:var(--chip);border-radius:2px;margin-top:4px;overflow:hidden}}.bar i{{display:block;height:100%;background:var(--acc)}}
+.sub td{{padding:4px 6px 4px 22px;font-size:14px}}
+a{{color:var(--acc)}}a.seg{{color:inherit;text-decoration:none;border-bottom:1px dotted var(--mut)}}a.seg:hover{{color:var(--acc)}}
+.pill.mut{{color:var(--mut)}}#sr td button{{padding:1px 8px;font-size:12px}}
 </style>
-<h1>Mounted torrents</h1>
-<div class=mut>Add magnet links or URLs of .torrent files (one per line, several at once is fine), or a .torrent file. Torrents with the same folder name share one folder, their files merged. Adding or removing restarts the service (once per batch).</div>
+<div class=page>
+<header><h1>athenafs</h1><span id=pill class="pill {pillcls}">{state}</span></header>
+<section class=card><h2>Add torrents</h2>
 <form class=add method=post action=/add>
-  <textarea class=l name=link rows=3 placeholder="magnet:?xt=urn:btih:…  or  https://…/file.torrent&#10;one per line" required></textarea>
+  <textarea class=l name=link rows=2 placeholder="magnet:?xt=urn:btih:…  or  https://…/file.torrent&#10;several: one per line" required></textarea>
   <input class=f type=text name=route placeholder="folder (optional)" title="Folder for every link of the batch. Torrents with the same folder name are merged into one folder.">
-  <button type=submit>Add</button>
+  <button class=primary type=submit>Add</button>
 </form>
-<div class=add><span class=mut>or a file:</span> <input type=file id=file accept=".torrent"
+<div class=add><span class="mut small">or a .torrent file:</span> <input type=file id=file accept=".torrent"
   onchange="const f=this.files[0];if(!f)return;fetch('/upload',{{method:'POST',headers:{{'X-Filename':encodeURIComponent(f.name)}},body:f}}).then(()=>location.reload())"></div>
-{capform}
+<div class="mut small">Torrents with the same folder name share one folder. Adding or removing restarts the service once per batch; the share is unavailable meanwhile.</div>
+</section>
+<section class=card><h2>Search files</h2>
+<input id=q type=search placeholder="part of a file or folder name; several words: all must match" style="width:100%" autocomplete=off>
+<div class="mut small" style="margin-top:4px">Click a folder in a result to list everything under it (<code>folder:path</code>); "Cache" reads files into the cache.</div>
+<div id=srmsg style="margin-top:8px"></div><div id=sr class="small" style="margin-top:8px"></div>
+</section>
 <main id=m>
-<div class=mut>Service: <b>{state}</b>. Cache on disk: <b>{cache}</b>{cap}. Container network since it started: <b>{rx}</b> received, <b>{tx}</b> sent. Refreshes every 5 s.</div>
-<div class=mut>Disk: <b>{dfree}</b> free of {dtotal}. Largest cache cap possible now: <b>{dmax}</b> (free space + what is already cached − 1 GB).</div>
 {msg}
-<h2>Sources</h2>
-<div class=wrap><table>
-<tr><th>Folder</th><th>Torrent</th><th>Status</th><th></th></tr>
+<div class=tiles>
+<div class=tile><span>Cache</span><b>{cache}</b><span>{cap}</span><div class=bar><i style="width:{cachepct}%"></i></div></div>
+<div class=tile><span>Disk free</span><b>{dfree}</b><span>of {dtotal}</span></div>
+<div class=tile><span>Download</span><b>{down}</b><span>upload {up} · received since start {rx}</span></div>
+<div class=tile><span>Torrents</span><b>{ntor}</b><span>in {nfold} folders</span></div>
+</div>
+<section class=card><h2>Activity</h2>{act}</section>
+<section class=card><h2>Folders</h2><div class=wrap><table>
+<tr><th>Folder</th><th>Torrents</th><th class=n>Size</th><th>Status</th></tr>
 {sources}
-</table></div>
-<h2>Cache</h2>
-<div class=wrap><table>
+</table></div></section>
+<section class=card><h2>Cache</h2><div class=wrap><table>
 <tr><th>Torrent</th><th class=n>Size</th><th class=n>Cached</th><th></th></tr>
 {rows}
-</table></div>
-{unknown}
-<form method=post action=/erase><input type=hidden name=h value=all>
-<button {dis} onclick="return confirm('Erase ALL local data? The service restarts (a few seconds) and reads in progress fail.')">Erase everything</button></form>
-<p class=mut>Erasing or removing restarts the service: the mounts are unavailable for a few seconds and reads in progress fail.
-It does not delete the .torrent files of the setup or the configuration.</p>
+</table></div>{unknown}</section>
 </main>
+<section class=card><details><summary><b>Settings</b> <span class="mut small">cache cap, erase everything</span></summary>
+<div style="margin-top:10px">{capform}
+<div class="mut small">Largest cache cap possible now: {dmax} (free space + what is already cached − 1 GB).</div>
+<form method=post action=/erase style="margin-top:12px"><input type=hidden name=h value=all>
+<button class=danger {dis} onclick="return confirm('Erase ALL local data? The service restarts (a few seconds) and reads in progress fail.')">Erase everything</button></form>
+<p class="mut small">Erasing or removing restarts the service: the share is unavailable for a few seconds and reads in progress fail.
+It does not delete the .torrent files of the setup or the configuration.</p></div></details></section>
+<p class="mut small">Refreshes every 5 s · <a href=/api>API</a></p>
+</div>
 <script>
+const esc=s=>s.replace(/[&<>"']/g,c=>({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[c]));
+const sz=n=>n<1e6?(n/1e3).toFixed(0)+' kB':n<1e9?(n/1e6).toFixed(0)+' MB':(n/1e9).toFixed(2)+' GB';
+const post=async(u,d)=>(await fetch(u,{{method:'POST',headers:{{'Content-Type':'application/x-www-form-urlencoded'}},body:new URLSearchParams(d)}})).json();
+const badge={{'cached':'ok','partial':'','not cached':'mut','queued':'busy','caching':'busy','downloading':'busy'}};
+let sq='',so=0,st;
+function pathHtml(p){{  // each folder of the path lists that folder when clicked
+  const parts=p.split('/'); let acc='';
+  return parts.map((x,i)=>{{acc+=(i?'/':'')+x; return i<parts.length-1?'<a href=# class=seg data-f="'+esc(acc)+'">'+esc(x)+'</a>':'<b>'+esc(x)+'</b>'}}).join('/');
+}}
+function row(f){{
+  const pct=f.size?Math.min(100,Math.round(f.cached*100/f.size)):0;
+  const label=f.status=='partial'?'partial '+pct+'%':f.status;
+  const btn=['cached','queued','caching'].includes(f.status)?'':'<button class=cache data-p="'+esc(f.path)+'">Cache</button>';
+  return '<tr><td class=small>'+pathHtml(f.path)+'</td><td class=n>'+sz(f.size)+'</td><td class=n><span class="pill '+(badge[f.status]||'')+'">'+esc(label)+'</span></td><td class=n>'+btn+'</td></tr>';
+}}
+async function runSearch(more){{
+  const q=document.getElementById('q').value.trim(), out=document.getElementById('sr');
+  if(!more){{so=0}} sq=q; if(!q){{out.innerHTML='';return}}
+  const r=await (await fetch('/api/search?q='+encodeURIComponent(q)+'&limit=100&offset='+so)).json();
+  if(q!==sq)return;
+  if(r.error){{out.innerHTML='<span class=mut>'+esc(r.error)+'</span>';return}}
+  const h=r.results.map(row).join('');
+  const shown=so+r.results.length;
+  const head='<div id=srh class=add><span class=mut>'+(r.total_capped?'more than '+r.total:r.total)+' file'+(r.total==1?'':'s')+', '+sz(r.total_size)
+    +(shown<r.total?' · showing '+shown:'')+'</span>'+(r.total?' <button id=srall>Cache all '+(r.total_capped?'(first '+r.total+')':'')+'</button>':'')+'</div>';
+  if(more){{document.getElementById('srt').insertAdjacentHTML('beforeend',h);document.getElementById('srh').outerHTML=head}}
+  else out.innerHTML=head+'<div class=wrap><table id=srt>'+h+'</table></div>';
+  document.getElementById('srm')?.remove();
+  if(shown<r.total)out.insertAdjacentHTML('beforeend','<button id=srm style="margin-top:8px">More</button>');
+}}
+async function cache(d){{
+  const r=await post('/api/prefetch',d);
+  document.getElementById('srmsg').innerHTML='<div class=msg>'+esc(r.error?r.error:(r.queued+' file(s) queued for the cache, '+sz(r.size)+(r.already?' ('+r.already+' already queued)':'')+': progress under Activity'))+'</div>';
+  runSearch(false);
+}}
+document.getElementById('q').addEventListener('input',()=>{{clearTimeout(st);st=setTimeout(()=>runSearch(false),250)}});
+document.addEventListener('click',e=>{{
+  const t=e.target;
+  if(t.classList.contains('seg')||t.classList.contains('browse')){{e.preventDefault();const q=document.getElementById('q');q.value='folder:'+t.dataset.f;q.scrollIntoView({{block:'center'}});runSearch(false)}}
+  else if(t.classList.contains('cache'))cache({{path:t.dataset.p}});
+  else if(t.id=='srall'){{if(confirm('Read every file of this search into the cache?'))cache({{q:document.getElementById('q').value.trim()}})}}
+  else if(t.id=='srm'){{so+=100;runSearch(true)}}
+  else if(t.id=='pfcancel')post('/api/prefetch/cancel',{{}});
+}});
 setInterval(async()=>{{try{{
-  const o=new Set([...document.querySelectorAll('details[open]')].map(d=>d.dataset.k));
+  const o=new Set([...document.querySelectorAll('#m details[open]')].map(d=>d.dataset.k));
   const t=await (await fetch('/',{{cache:'no-store'}})).text();
-  const n=new DOMParser().parseFromString(t,'text/html').getElementById('m'); if(!n)return;
-  n.querySelectorAll('details').forEach(d=>{{if(o.has(d.dataset.k))d.open=true}});
+  const d=new DOMParser().parseFromString(t,'text/html'), n=d.getElementById('m'); if(!n)return;
+  n.querySelectorAll('details').forEach(x=>{{if(o.has(x.dataset.k))x.open=true}});
   document.getElementById('m').replaceWith(n);
+  const p=d.getElementById('pill'); if(p)document.getElementById('pill').replaceWith(p);
 }}catch(e){{}}}},5000)
 </script>"""
 
@@ -655,7 +850,7 @@ setInterval(async()=>{{try{{
 def node(ih, n, dis):
     """HTML of one folder or file of the tree, with its Erase button."""
     button = (f"<form method=post action=/erase><input type=hidden name=h value={ih}><input type=hidden name=p value=\"{html.escape(n['path'], quote=True)}\">"
-              f"<button {dis} onclick=\"return confirm('Erase the local data of {html.escape(n['name'], quote=True)}?')\">Erase</button></form>")
+              f"<button class=danger {dis} onclick=\"return confirm('Erase the local data of {html.escape(n['name'], quote=True)}?')\">Erase</button></form>")
     if not n["children"]:
         return f"<div class=row><span>{html.escape(n['name'])}</span><span class=sz>≈ {mb(n['size'])} {button}</span></div>"
     kids = sorted(n["children"].values(), key=lambda x: -x["size"])
@@ -665,33 +860,64 @@ def node(ih, n, dis):
             f"<span class=sz>≈ {mb(n['size'])} {button}</span></summary><div class=tree>{body}{more}</div></details>")
 
 
+def ask_form(field, value, dis, label, question, current):
+    """A button that asks for a folder name, then posts it to /rename."""
+    q = json.dumps(question).replace('"', "&quot;"); c = json.dumps(current).replace('"', "&quot;")
+    return (f"<form method=post action=/rename onsubmit=\"const n=prompt({q},{c});if(!n||n=={c})return false;this.new.value=n\">"
+            f"<input type=hidden name={field} value=\"{html.escape(value, quote=True)}\"><input type=hidden name=new>"
+            f"<button {dis}>{label}</button></form>")
+
+
 def render():
     s = snapshot(); dis = "" if s["state"] == "running" else "disabled"
     rows = ""
     for i in s["items"]:
-        rows += (f"<tr><td><b>{html.escape(i['name'])}</b><br><span class=mut>{html.escape(i['route'])} · {i['pieces']} pieces · {i['peers']} peers</span></td>"
+        if not i["cache"]:
+            continue   # mounted, nothing cached: the Folders section lists it
+        rows += (f"<tr><td><b>{html.escape(i['name'])}</b><br><span class=\"mut small\">{html.escape(i['route'])} · {i['pieces']} pieces · {i['peers']} peers</span></td>"
                  f"<td class=n>{mb(i['total'])}</td><td class=n>{mb(i['cache'])}</td>"
-                 f"<td><form method=post action=/erase><input type=hidden name=h value={i['hash']}>"
-                 f"<button {dis} onclick=\"return confirm('Erase the local data of this whole torrent?')\">Whole torrent</button></form></td></tr>")
+                 f"<td class=n><form method=post action=/erase><input type=hidden name=h value={i['hash']}>"
+                 f"<button class=danger {dis} onclick=\"return confirm('Erase the local data of this whole torrent?')\">Erase</button></form></td></tr>")
         if i["tree"]:
             kids = sorted(i["tree"]["children"].values(), key=lambda x: -x["size"])
             body = "".join(node(i["hash"], e, dis) for e in kids[:300])
             more = f"<div class=mut>… {len(kids) - 300} more at the top level</div>" if len(kids) > 300 else ""
-            rows += (f"<tr><td colspan=4><details data-k=\"{i['hash']}\"><summary>Files with cached data</summary>"
+            rows += (f"<tr><td colspan=4><details data-k=\"{i['hash']}\"><summary class=small>Files with cached data</summary>"
                      f"<div class=tree>{body}{more}</div></details></td></tr>")
     if not rows:
         rows = "<tr><td colspan=4 class=mut>Nothing cached.</td></tr>"
-    srows = ""
+    folders = {}
     for x in s["sources"]:
-        srows += (f"<tr><td>{html.escape(x['route'])}</td><td>{html.escape(x['name'] or (x['hash'] or '')[:12])}<br><span class=mut>{x['kind']}</span></td>"
-                  f"<td>{x['status']}</td><td class=n><form method=post action=/remove><input type=hidden name=id value={x['id']}>"
-                  f"<button {dis} name=erase value=1 onclick=\"return confirm('Remove this torrent and erase its local data?')\">Remove</button> "
-                  f"<button {dis} name=erase value=0 onclick=\"return confirm('Remove this torrent and keep its local data?')\">Remove, keep data</button></form></td></tr>")
+        folders.setdefault(x["route"], []).append(x)
+    srows = ""
+    for route, xs in folders.items():
+        counts = {}
+        for x in xs:
+            counts[x["status"]] = counts.get(x["status"], 0) + 1
+        status = ", ".join(f"{n} {st}" if len(xs) > 1 else st for st, n in counts.items())
+        names = sorted({x["name"] or (x["hash"] or "")[:12] for x in xs})
+        label = html.escape(names[0]) + (f" <span class=mut>+{len(xs) - 1}</span>" if len(xs) > 1 else "")
+        inner = ""
+        for x in xs[:200]:
+            inner += (f"<tr class=sub><td>{html.escape(x['name'] or (x['hash'] or '')[:12])} <span class=\"mut small\">{x['kind']} · {(x['hash'] or '')[:8]}</span></td>"
+                      f"<td class=\"n small\">{mb(x['size']) if x['size'] else ''}</td><td class=small>{html.escape(x['status'])}</td>"
+                      f"<td class=n>{ask_form('id', x['id'], dis, 'Move', 'Move this torrent to the folder (an existing folder name merges it there):', route)} "
+                      f"<form method=post action=/remove><input type=hidden name=id value={x['id']}>"
+                      f"<button class=danger {dis} name=erase value=1 onclick=\"return confirm('Remove this torrent and erase its local data?')\">Remove</button> "
+                      f"<button {dis} name=erase value=0 onclick=\"return confirm('Remove this torrent and keep its local data?')\">Remove, keep data</button></form></td></tr>")
+        srows += (f"<tr><td><b>{html.escape(route)}</b> <a href=# class=browse data-f=\"{html.escape(route, quote=True)}\">browse</a> {ask_form('route', route, dis, 'Rename', 'New name for this folder (an existing folder name merges the two; later torrents of the old name follow):', route)}</td><td>{label}</td><td class=n>{mb(sum(x['size'] for x in xs))}</td>"
+                  f"<td>{html.escape(status)}</td></tr>"
+                  f"<tr><td colspan=4 style=\"padding-top:0\"><details data-k=\"src/{html.escape(route, quote=True)}\"><summary class=\"mut small\">"
+                  f"{len(xs)} torrent{'s' if len(xs) > 1 else ''}</summary><table>{inner}</table>"
+                  + (f"<div class=\"mut small\">… and {len(xs) - 200} more (the full list is in <a href=/api>/api</a>)</div>" if len(xs) > 200 else "")
+                  + "</details></td></tr>")
     if not srows:
         srows = "<tr><td colspan=4 class=mut>No torrent yet: add one above.</td></tr>"
     msg = f"<div class=msg>{html.escape(s['message'])}</div>" if s["message"] else ""
-    cap = f" of a {s['capacity']} MB limit" if s["capacity"] else ""
-    unk = (f"<p class=mut>{mb(s['unknown'])} of cache belongs to no known torrent: "
+    capmb = s["capacity"] or 0
+    cap = f"of a {mb(capmb * 1e6)} limit" if capmb else ""
+    pct = min(100, round(s["total_cache"] / (capmb * 1e6) * 100, 1)) if capmb else 0
+    unk = (f"<p class=\"mut small\">{mb(s['unknown'])} of cache belongs to no known torrent: "
            f"only “Erase everything” removes it.</p>") if s["unknown"] > 1e6 else ""
     st = s["settings"]
     capform = ("<form class=add method=post action=/settings><span class=mut>Cache cap:</span>"
@@ -700,9 +926,38 @@ def render():
                f"<label><input type=radio name=mode value=auto {'checked' if st['mode'] == 'auto' else ''}> automatic: keep</label>"
                f"<input type=number name=reserve_pct step=1 min=1 max=90 value={st['reserve_pct']:g} style=\"width:70px\"> % of the disk free"
                "<button type=submit>Apply (restarts)</button></form>")
-    return PAGE.format(capform=capform, dfree=mb(s["disk_free"]), dtotal=mb(s["disk_total"]), dmax=mb(s["max_cap_mb"] * 1e6),
-                       state=s["state"], cache=mb(s["total_cache"]), cap=cap, msg=msg, rows=rows, sources=srows, unknown=unk,
-                       dis=dis, rx=mb(s["network_rx"]), tx=mb(s["network_tx"]))
+    a = activity_view()
+    act = ""
+    if a["torrents"]:
+        act += "<div class=wrap><table><tr><th>Torrent</th><th>Folder</th><th class=n>Down</th><th class=n>Up</th><th class=n>Peers</th></tr>"
+        for x in a["torrents"][:15]:
+            act += (f"<tr><td>{html.escape(x['name'])} <span class=\"mut small\">{x['hash'][:8]}</span></td><td>{html.escape(x['route'])}</td>"
+                    f"<td class=n>{rate(x['down'])}</td><td class=n>{rate(x['up'])}</td><td class=n>{x['peers']}</td></tr>")
+        act += "</table></div>"
+    else:
+        act += "<div class=\"mut small\">No transfer right now.</div>"
+    pf = a["prefetch"]
+    if pf["active"] or pf["queued"]:
+        act += (f"<div style=\"margin-top:10px\"><b class=small>Adding to the cache</b> <span class=\"mut small\">{pf['queued']} queued "
+                f"({mb(pf['queued_size'])}) · {pf['done']} done</span> <button id=pfcancel class=danger>Cancel all</button></div><div class=wrap><table>")
+        for j in pf["active"]:
+            pct = min(100, round(j["read"] * 100 / j["size"])) if j["size"] else 0
+            act += (f"<tr><td class=small>{html.escape(j['path'])}<div class=bar><i style=\"width:{pct}%\"></i></div></td>"
+                    f"<td class=\"n small\">{mb(j['read'])} / {mb(j['size'])}</td></tr>")
+        act += "</table></div>"
+    if pf["failed"]:
+        act += "".join(f"<div class=\"mut small\">could not cache {html.escape(f['path'])}: {html.escape(f['error'])}</div>" for f in pf["failed"][-3:])
+    if a["files"]:
+        act += (f"<div class=\"mut small\" style=\"margin-top:10px\">Files that received data in the last {WINDOW} s "
+                "(counted per completed piece):</div><div class=wrap><table>")
+        for f in a["files"][:15]:
+            act += (f"<tr><td class=small>{html.escape(f['path'])}</td><td class=\"n small\">{mb(f['bytes'])}</td>"
+                    f"<td class=\"n small mut\">{f['ago']} s ago</td></tr>")
+        act += "</table></div>"
+    return PAGE.format(capform=capform, act=act, down=rate(a["down"]), up=rate(a["up"]), dfree=mb(s["disk_free"]), dtotal=mb(s["disk_total"]), dmax=mb(s["max_cap_mb"] * 1e6),
+                       state=html.escape(s["state"]), pillcls="ok" if s["state"] == "running" else "busy",
+                       cache=mb(s["total_cache"]), cap=cap, cachepct=pct, msg=msg, rows=rows, sources=srows, unknown=unk,
+                       dis=dis, rx=mb(s["network_rx"]), tx=mb(s["network_tx"]), ntor=len(s["sources"]), nfold=len(folders))
 
 
 class H(http.server.BaseHTTPRequestHandler):
@@ -731,6 +986,16 @@ class H(http.server.BaseHTTPRequestHandler):
             return
         if self.path == "/api":
             body = json.dumps(snapshot()).encode(); ct = "application/json"
+        elif self.path.startswith("/api/search"):
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            one = lambda k, d: (q.get(k) or [d])[0]
+            try:
+                res = search(one("q", ""), one("limit", "50"), one("offset", "0"))
+            except ValueError:
+                res = {"error": "limit and offset must be integers"}
+            body = json.dumps(res).encode(); ct = "application/json"
+        elif self.path == "/api/activity":
+            body = json.dumps(activity_view()).encode(); ct = "application/json"
         else:
             body = render().encode(); ct = "text/html; charset=utf-8"
         self.send_response(200); self.send_header("Content-Type", ct)
@@ -744,6 +1009,13 @@ class H(http.server.BaseHTTPRequestHandler):
             self.send_response(413); self.send_header("Content-Length", "0"); self.end_headers(); return
         raw = self.rfile.read(n)
         go = lambda fn, *a: threading.Thread(target=fn, args=a, daemon=True).start()
+        if self.path in ("/api/prefetch", "/api/prefetch/cancel"):
+            q = urllib.parse.parse_qs(raw.decode("utf-8", "replace"))
+            res = prefetch_cancel() if self.path.endswith("cancel") else prefetch_add((q.get("q") or [""])[0], q.get("path") or [])
+            body = json.dumps(res).encode()
+            self.send_response(200); self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+            return
         if self.path == "/upload":
             name = urllib.parse.unquote(self.headers.get("X-Filename", "")).rsplit(".torrent", 1)[0]
             go(lambda: exclusive(lambda: add_torrent_bytes(raw, name)))
@@ -756,9 +1028,315 @@ class H(http.server.BaseHTTPRequestHandler):
                 go(apply_settings, one("mode"), one("cache_gb") or "0", one("reserve_pct") or "20")
             elif self.path == "/add" and one("link"):
                 go(add_links, one("link"), one("route"))
+            elif self.path == "/rename" and one("new") and (one("route") or re.fullmatch(r"[0-9a-f]{8}", one("id"))):
+                go(rename, one("new"), one("route"), one("id") if not one("route") else "")
             elif self.path == "/remove" and re.fullmatch(r"[0-9a-f]{8}", one("id")):
                 go(remove_source, one("id"), one("erase") != "0")
         self.send_response(303); self.send_header("Location", "/"); self.end_headers()
+
+
+# ---------------------------------------------------------------- activity (rates, files receiving pieces)
+
+WINDOW = 30   # seconds of history for "files receiving data"
+activity = {"at": 0, "routes": [], "down": 0, "up": 0, "net_rx": 0, "net_tx": 0, "torrents": [], "files": []}
+
+
+def sampler():
+    """Every 2 s: rates per torrent (from Distribyted's cumulative counters) and the files whose pieces just reached the cache.
+    The only regular caller of Distribyted's /routes, so its numbers are not disturbed by page refreshes."""
+    prev, prev_net, prev_pieces, recent = {}, None, None, []
+    piece_owner, owner_key = {}, None
+    while True:
+        time.sleep(2)
+        now = time.time()
+        routes = api("/routes", 20)   # slow while hundreds of torrents are being added (the client lock is busy)
+        p = state.get("proc")
+        if routes is None and p and p.poll() is None and now - activity["at"] < 120:
+            continue   # running but busy: keep the last known state for a while
+        if routes is None:   # stopped or restarting
+            prev, prev_pieces = {}, None
+            activity.update(at=now, routes=[], down=0, up=0, torrents=[])
+            continue
+        net = network()
+        if prev_net:
+            dt = now - prev_net[0]
+            activity["net_rx"], activity["net_tx"] = (net[0] - prev_net[1]) / dt, (net[1] - prev_net[2]) / dt
+        prev_net = (now, *net)
+        rows, cur = [], {}
+        for r in routes:
+            for t in r.get("torrentStats") or []:
+                d, u = t.get("totalDownloadedBytes", 0), t.get("totalUploadedBytes", 0)
+                cur[t["hash"]] = (now, d, u)
+                p = prev.get(t["hash"])
+                rd = max(0, (d - p[1]) / (now - p[0])) if p else 0
+                ru = max(0, (u - p[2]) / (now - p[0])) if p else 0
+                rows.append({"hash": t["hash"], "name": t["name"], "route": r["name"], "down": rd, "up": ru,
+                             "peers": t.get("peers", 0), "seeders": t.get("seeders", 0),
+                             "downloaded": d, "uploaded": u})
+        prev = cur
+        # pieces that appeared in the cache since the last sample -> torrent, file
+        try:
+            pieces = {e.name: e.stat().st_size for e in os.scandir(CACHE)}
+        except OSError:
+            pieces = {}
+        if prev_pieces is not None:
+            new = pieces.keys() - prev_pieces.keys()
+            if new:
+                tp = torrent_pieces()
+                key = tuple(sorted(tp))
+                if key != owner_key:
+                    piece_owner, owner_key = {}, key
+                    for ih, t in tp.items():
+                        for i, h in enumerate(t["plist"]):
+                            piece_owner.setdefault(h, []).append((ih, i))
+                route_of = {x["hash"]: x["route"] for x in rows}
+                flat = flat_folders(tp)
+                for h in new:
+                    for ih, i in piece_owner.get(h, ()):
+                        t = tp[ih]; o = i * t["pl"]
+                        k = bisect.bisect_right(t["offsets"], o) - 1
+                        # a piece can span several files: credit each file the part of the piece it holds
+                        while 0 <= k < len(t["files"]) and t["files"][k][1] < o + pieces[h]:
+                            path, fo, fl = t["files"][k]
+                            part = min(o + pieces[h], fo + fl) - max(o, fo)
+                            if part > 0 and not is_padding(path):
+                                recent.append((now, ih, share_path(route_of.get(ih, "?"), t, path, flat.get(route_of.get(ih))), part))
+                            k += 1
+        prev_pieces = pieces
+        recent = [x for x in recent if x[0] > now - WINDOW]
+        files = {}
+        for at, ih, path, n in recent:
+            f = files.setdefault(path, {"path": path, "hash": ih, "bytes": 0, "last": 0})
+            f["bytes"] += n; f["last"] = max(f["last"], at)
+        activity.update(at=now, routes=routes, torrents=sorted(rows, key=lambda x: -(x["down"] + x["up"])),
+                        down=sum(x["down"] for x in rows), up=sum(x["up"] for x in rows),
+                        files=sorted(files.values(), key=lambda f: -f["last"])[:50])
+
+
+# ---------------------------------------------------------------- file search
+
+def db():
+    c = sqlite3.connect(INDEX, timeout=30)
+    c.execute("PRAGMA journal_mode=WAL")
+    return c
+
+
+def index_wanted():
+    """info-hash -> (folder, layout), for every source whose metadata is known. The layout changes when the folder's
+    top-level directory starts or stops being skipped, which moves every path of the torrent in the share."""
+    tp, sources = torrent_pieces(), load_sources()
+    flat = flat_folders(tp, sources)
+    return {h: (s["route"], share_path(s["route"], tp[h], "", flat[s["route"]]))
+            for s in sources if (h := source_hash(s)) in tp}, tp, flat
+
+
+def sync_index():
+    """Bring the index in line with the sources: only torrents added, removed or moved to another folder are (re)indexed.
+    Reads the .torrent files only: nothing is downloaded and archives are not opened."""
+    wanted, tp, flat = index_wanted()
+    c = db()
+    with c:
+        c.execute("CREATE TABLE IF NOT EXISTS torrents(hash TEXT PRIMARY KEY, route TEXT, layout TEXT)")
+        c.execute("CREATE TABLE IF NOT EXISTS files(id INTEGER PRIMARY KEY, hash TEXT, path TEXT, tpath TEXT, size INTEGER, off INTEGER)")
+        c.execute("CREATE INDEX IF NOT EXISTS files_hash ON files(hash)")
+        c.execute("CREATE INDEX IF NOT EXISTS files_path ON files(path)")
+        c.execute("CREATE VIRTUAL TABLE IF NOT EXISTS files_fts USING fts5(path, content='files', content_rowid='id', tokenize='trigram')")
+    have = dict(((h, (r, l)) for h, r, l in c.execute("SELECT hash, route, layout FROM torrents")))
+    changed = 0
+    for h in set(have) | set(wanted):
+        t = tp.get(h)
+        want = wanted.get(h)
+        if have.get(h) == want:
+            continue
+        with c:
+            if h in have:
+                c.execute("INSERT INTO files_fts(files_fts, rowid, path) SELECT 'delete', id, path FROM files WHERE hash=?", (h,))
+                c.execute("DELETE FROM files WHERE hash=?", (h,))
+                c.execute("DELETE FROM torrents WHERE hash=?", (h,))
+            if want:
+                rows = [(h, share_path(want[0], t, p, flat[want[0]]), p, n, o) for p, o, n in t["files"] if n > 0 and not is_padding(p)]
+                c.executemany("INSERT INTO files(hash, path, tpath, size, off) VALUES (?,?,?,?,?)", rows)
+                c.execute("INSERT INTO files_fts(rowid, path) SELECT id, path FROM files WHERE hash=?", (h,))
+                c.execute("INSERT INTO torrents VALUES (?,?,?)", (h, *want))
+        changed += 1
+    c.close()
+    return changed
+
+
+def indexer():
+    """Keeps the index in sync: at start, and whenever the sources or the known metadata change."""
+    last = None
+    while True:
+        try:
+            wanted, _, _ = index_wanted()
+            key = sorted(wanted.items())
+            if key != last:
+                n = sync_index()
+                if n:
+                    print(f"search index: {n} torrents (re)indexed")
+                last = key
+        except Exception as e:
+            print("search index error:", e)
+        time.sleep(10)
+
+
+def query_sql(q):
+    """SQL (FROM/WHERE part, args) for a search: words that must all appear in the path, or folder:<path> for everything
+    under a folder of the share."""
+    q = q.strip()
+    if q.startswith("folder:"):
+        prefix = q[7:].strip().strip("/") + "/"
+        return "FROM files WHERE path >= ? AND path < ?", [prefix, prefix + "\U0010ffff"]
+    words = [w for w in q.split() if w]
+    if not words:
+        return None, None
+    if all(len(w) >= 3 for w in words):   # trigram index: substring match
+        m = " AND ".join('"' + w.replace('"', '""') + '"' for w in words)
+        return "FROM files_fts JOIN files ON files.id = files_fts.rowid WHERE files_fts MATCH ?", [m]
+    # a word shorter than 3 characters: plain scan
+    return ("FROM files WHERE " + " AND ".join("path LIKE ? ESCAPE '\\'" for _ in words),
+            ["%" + w.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%" for w in words])
+
+
+SEARCH_CAP = 10000   # results counted (and cacheable at once) at most
+
+
+def file_state(h, path, off, size, tp, cached):
+    """(status, cached bytes) of one file. Status: cached, partial, not cached, or queued / caching (prefetch) and
+    downloading (pieces of it reached the cache in the last seconds)."""
+    t, have = tp.get(h), 0
+    present = total = 0
+    if t and size > 0:
+        pl = t["pl"]
+        for i in range(off // pl, (off + size - 1) // pl + 1):
+            total += 1
+            if t["plist"][i] in cached:
+                present += 1
+        have = min(size, present * pl)
+    with plock:
+        if path in prefetch["active"]:
+            return "caching", have
+        if path in prefetch["queued"]:
+            return "queued", have
+    if total and present == total:
+        return "cached", size
+    if any(f["path"] == path for f in activity["files"]):
+        return "downloading", have
+    return ("partial" if present else "not cached"), have
+
+
+def search(q, limit=50, offset=0):
+    """Files whose path (as seen in the share) contains every word of q, case-insensitive; or folder:<path>."""
+    limit, offset = max(1, min(int(limit), 500)), max(0, int(offset))
+    base, args = query_sql(q)
+    if not base:
+        return {"query": q, "total": 0, "results": []}
+    c = db()
+    try:
+        total, total_size = c.execute(f"SELECT count(*), coalesce(sum(size), 0) FROM (SELECT files.size {base} LIMIT {SEARCH_CAP + 1})",
+                                      args).fetchone()
+        rows = c.execute(f"SELECT files.hash, files.path, files.tpath, files.size, files.off {base} LIMIT ? OFFSET ?",   # rowid order
+                         args + [limit, offset]).fetchall()
+    except sqlite3.OperationalError as e:
+        return {"query": q, "total": 0, "results": [], "error": str(e)}
+    finally:
+        c.close()
+    tp, cached = torrent_pieces(), set(cache_files())
+    out = []
+    for h, path, tpath, size, off in rows:
+        st, have = file_state(h, path, off, size, tp, cached)
+        out.append({"path": path, "size": size, "hash": h, "torrent_path": tpath, "cached": have, "status": st})
+    return {"query": q, "total": min(total, SEARCH_CAP), "total_capped": total > SEARCH_CAP, "total_size": total_size,
+            "offset": offset, "results": out}
+
+
+# ---------------------------------------------------------------- prefetch ("add to cache"): read files through the mount
+
+PREFETCH_WORKERS = 2
+plock = threading.Lock()
+prefetch = {"queue": collections.deque(), "queued": {}, "active": {}, "done": 0, "failed": [], "bytes": 0}
+
+
+def prefetch_add(q="", paths=()):
+    """Queue the files of a search (q, as in search(), at most SEARCH_CAP) or the given share paths for reading.
+    Refused when the total is larger than the cache cap: the first files would be evicted before the last are read."""
+    c = db()
+    try:
+        if q:
+            base, args = query_sql(q)
+            if not base:
+                return {"error": "empty query"}
+            rows = c.execute(f"SELECT files.path, files.size {base} LIMIT {SEARCH_CAP}", args).fetchall()
+        else:
+            rows = [r for p in paths for r in c.execute("SELECT path, size FROM files WHERE path = ?", (p,)).fetchall()]
+    finally:
+        c.close()
+    capmb = effective_cap_mb(load_settings())
+    with plock:
+        new = [(p, n) for p, n in rows if p not in prefetch["queued"] and p not in prefetch["active"]]
+        size = sum(n for _, n in new)
+        if size + sum(prefetch["queued"].values()) > capmb * 1e6 * 0.9:
+            return {"error": f"{mb(size)} is more than the cache can hold ({mb(capmb * 1e6)}): nothing queued", "size": size}
+        for p, n in new:
+            prefetch["queue"].append(p); prefetch["queued"][p] = n
+    return {"queued": len(new), "size": size, "already": len(rows) - len(new)}
+
+
+def prefetch_cancel():
+    with plock:
+        n = len(prefetch["queue"])
+        prefetch["queue"].clear(); prefetch["queued"].clear()
+        for a in prefetch["active"].values():
+            a["cancel"] = True
+    return {"cancelled": n}
+
+
+def prefetch_worker():
+    while True:
+        with plock:
+            path = prefetch["queue"].popleft() if prefetch["queue"] and state["state"] == "running" else None
+            if path:
+                size = prefetch["queued"].pop(path, 0)
+                job = prefetch["active"][path] = {"path": path, "size": size, "read": 0, "cancel": False}
+        if not path:
+            time.sleep(1); continue
+        ok, err = False, ""
+        for attempt in range(3):   # a read can time out (no peer yet) or fail during a restart
+            try:
+                with open(os.path.join(MOUNT, path), "rb", buffering=0) as f:
+                    f.seek(job["read"])
+                    while not job["cancel"]:
+                        b = f.read(1 << 20)
+                        if not b:
+                            break
+                        job["read"] += len(b)
+                ok = not job["cancel"]
+                break
+            except OSError as e:
+                err = str(e); time.sleep(5)
+        with plock:
+            prefetch["active"].pop(path, None)
+            prefetch["bytes"] += job["read"]
+            if ok:
+                prefetch["done"] += 1
+            elif not job["cancel"]:
+                prefetch["failed"] = (prefetch["failed"] + [{"path": path, "error": err}])[-20:]
+
+
+def prefetch_view():
+    with plock:
+        return {"queued": len(prefetch["queue"]), "queued_size": sum(prefetch["queued"].values()),
+                "active": [{k: v for k, v in a.items() if k != "cancel"} for a in prefetch["active"].values()],
+                "done": prefetch["done"], "failed": list(prefetch["failed"]), "bytes_read": prefetch["bytes"]}
+
+
+def activity_view():
+    now = time.time()
+    return {"down": activity["down"], "up": activity["up"], "net_rx": activity["net_rx"], "net_tx": activity["net_tx"],
+            "window_s": WINDOW,
+            "torrents": [x for x in activity["torrents"] if x["down"] > 0 or x["up"] > 0],
+            "files": [dict(f, rate=f["bytes"] / WINDOW, ago=round(now - f["last"])) for f in activity["files"]],
+            "prefetch": prefetch_view()}
 
 
 def watchdog():
@@ -786,6 +1364,10 @@ def watchdog():
 def main():
     start()
     threading.Thread(target=watchdog, daemon=True).start()
+    threading.Thread(target=sampler, daemon=True).start()
+    threading.Thread(target=indexer, daemon=True).start()
+    for _ in range(PREFETCH_WORKERS):
+        threading.Thread(target=prefetch_worker, daemon=True).start()
     srv = http.server.ThreadingHTTPServer(("0.0.0.0", 8080), H)
     signal.signal(signal.SIGTERM, lambda *a: (stop(), os._exit(0)))
     srv.serve_forever()

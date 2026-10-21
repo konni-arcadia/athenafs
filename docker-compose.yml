@@ -14,6 +14,8 @@ services:
     environment:
       DISTRIBYTED_CONFIG: /config/config.yaml
       DISTRIBYTED_METAINFO_DIR: /data/metainfo
+      DISTRIBYTED_ROOT_FILES: /data/share-root      # files shown at the root of the share (links to the page)
+      ATHENAFS_PAGE_URL: "${ATHENAFS_PAGE_URL:-}"   # address of this page as seen from the network (set by scripts/up.sh)
       DISTRIBYTED_ARCHIVES: "${ATHENAFS_ARCHIVES:-off}"   # "on": zip/7z/rar open as folders (expensive to browse)
     ports: ["${ATHENAFS_BIND:-127.0.0.1}:${ATHENAFS_PORT:-8080}:8080"]
     volumes:

@@ -1,0 +1,32 @@
+diff --git a/torrent/service.go b/torrent/service.go
+index dbd4dc2..c9a255a 100644
+--- a/torrent/service.go
++++ b/torrent/service.go
+@@ -166,7 +166,15 @@ func (s *Service) addTorrent(r string, t *torrent.Torrent) error {
+ 			if !s.continueWhenAddTimeout {
+ 				return errors.New("timeout getting torrent info")
+ 			} else {
+-				s.log.Info().Str("hash", t.InfoHash().String()).Msg("ignoring timeout error")
++				// keep waiting in the background: the torrent appears in its folder as soon as its info arrives
++				s.log.Info().Str("hash", t.InfoHash().String()).Msg("ignoring timeout error, still waiting in the background")
++				go func() {
++					<-t.GotInfo()
++					s.log.Info().Str("hash", t.InfoHash().String()).Msg("obtained torrent info (late)")
++					if err := s.finishAdd(r, t); err != nil {
++						s.log.Error().Err(err).Str("route", r).Msg("late torrent not added")
++					}
++				}()
+ 				return nil
+ 			}
+ 		case <-t.GotInfo():
+@@ -175,6 +183,10 @@ func (s *Service) addTorrent(r string, t *torrent.Torrent) error {
+ 
+ 	}
+ 
++	return s.finishAdd(r, t)
++}
++
++func (s *Service) finishAdd(r string, t *torrent.Torrent) error {
+ 	// Add to stats
+ 	s.s.Add(r, t)
+ 

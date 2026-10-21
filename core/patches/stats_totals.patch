@@ -1,0 +1,27 @@
+diff --git a/torrent/stats.go b/torrent/stats.go
+index 88cfc3e..5ea8a3b 100644
+--- a/torrent/stats.go
++++ b/torrent/stats.go
+@@ -37,6 +37,9 @@ type TorrentStats struct {
+ 	PieceChunks     []*PieceChunk `json:"pieceChunks"`
+ 	TotalPieces     int           `json:"totalPieces"`
+ 	PieceSize       int64         `json:"pieceSize"`
++	// Cumulative since the torrent was added (the fields above are deltas between calls).
++	TotalDownloadedBytes int64 `json:"totalDownloadedBytes"`
++	TotalUploadedBytes   int64 `json:"totalUploadedBytes"`
+ }
+ 
+ type byName []*TorrentStats
+@@ -222,6 +225,12 @@ func (s *Stats) stats(now time.Time, t *torrent.Torrent, chunks bool) *TorrentSt
+ 		s.previousStats[t.InfoHash().String()] = ist
+ 	}
+ 
++	cst := t.Stats() // cumulative counters and peers, whatever the throttling above returned
++	ts.TotalDownloadedBytes = cst.BytesReadData.Int64()
++	ts.TotalUploadedBytes = cst.BytesWrittenData.Int64()
++	ts.Peers = cst.TotalPeers
++	ts.Seeders = cst.ConnectedSeeders
++
+ 	ts.TimePassed = now.Sub(prev.time).Seconds()
+ 	var totalPieces int
+ 	if chunks {
