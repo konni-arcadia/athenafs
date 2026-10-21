@@ -10,5 +10,5 @@ tp = g["torrent_pieces"]()
 sources = g["load_sources"]()
 known = {g["source_hash"](s) for s in sources} & set(tp)
 ts = [tp[h] for h in known]
-print(len(sources), len(ts), sum(len(t["plist"]) for t in ts), sum(len(t["files"]) for t in ts),
+print(len(sources), len(ts), sum(t["npieces"] if "npieces" in t else len(t["plist"]) for t in ts), sum(len(t["files"]) for t in ts),
       round(sum(t["total"] for t in ts) / 1e12, 1))

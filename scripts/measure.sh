@@ -34,8 +34,8 @@ rss() { docker exec athenafs-core sh -c "awk '/VmRSS/ {printf \"%.1f\", \$2/1048
 rss_core=$(rss "$(docker exec athenafs-core pidof distribyted)")
 rss_admin=$(rss 1)
 timing() {
-  for i in 1 2 3; do curl -s -o /dev/null -m 120 -w '%{time_total}\n' "http://localhost:${ATHENAFS_PORT:-8080}$1"; done |
-    sort -n | sed -n 2p | awk '{printf "%.2f", $1}'
+  for i in 1 2 3; do curl -s -o /dev/null -m 120 -w '%{time_total}\n' "http://localhost:${ATHENAFS_PORT:-8080}$1" || echo 999; done |
+    sort -n | sed -n 2p | awk '{ if ($1 >= 120) printf ">120"; else printf "%.2f", $1 }'   # >120: timed out
 }
 t_api=$(timing /api); t_page=$(timing /); t_act=$(timing /api/activity); t_search=$(timing '/api/search?q=text')
 
