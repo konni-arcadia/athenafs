@@ -40,10 +40,13 @@ sh scripts/down.sh        # stops everything and releases the host mount point
   automatic (keep a percentage of the disk free, computed at each start).
 - Every change restarts the core service (a few seconds): the mounts are unavailable meanwhile and reads in progress fail.
   With hundreds of torrents the folders then fill in over a few minutes.
-- **API** (JSON): `GET /api` (status, sources, cache), `GET /api/activity` (rates, files receiving data),
-  `GET /api/search?q=words&limit=50&offset=0` (or `q=folder:path`), `POST /api/prefetch` with `path=…` (repeatable) or
-  `q=…`, `POST /api/prefetch/cancel`. POST requests need an `Origin` header naming the page's host (anti-CSRF), e.g.
-  `curl -H 'Origin: http://localhost:8080' --data-urlencode 'path=folder/file' http://localhost:8080/api/prefetch`.
+- **Largest in the cache**: by file, folder or torrent, with **Erase** per line and links to open the item over SMB.
+- **API** (JSON), documented at `/api/docs` (and `/api/openapi.json`): status (`/api/status`, `/api/torrents`), search with
+  each file's state and its `smb://` and `\\host\share\…` locations (`/api/search`, `/api/file`), what takes the most
+  room in the cache (`/api/usage`), and actions (`POST /api/prefetch`, `POST /api/erase`). POST requests need an `Origin`
+  header naming the page's host or `X-Athenafs: 1`, e.g.
+  `curl -H 'X-Athenafs: 1' --data-urlencode 'path=folder/file' http://localhost:8080/api/prefetch`.
+  The SMB host name in the locations is the host of `ATHENAFS_PAGE_URL` unless `ATHENAFS_SMB_HOST` is set.
 - There is **no authentication**. By default it listens on `127.0.0.1`; `ATHENAFS_BIND=0.0.0.0` opens it to the local network,
   where anyone can add torrents and erase the cache. POST requests must come from the page itself (anti-CSRF).
   A URL given to the page is fetched only if it is http(s) and resolves to public addresses.

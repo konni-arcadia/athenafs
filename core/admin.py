@@ -827,7 +827,7 @@ input[type=text],input[type=number],input[type=search],textarea{{font:inherit;pa
 .bar{{height:4px;background:var(--chip);border-radius:2px;margin-top:4px;overflow:hidden}}.bar i{{display:block;height:100%;background:var(--acc)}}
 .sub td{{padding:4px 6px 4px 22px;font-size:14px}}
 a{{color:var(--acc)}}a.seg{{color:inherit;text-decoration:none;border-bottom:1px dotted var(--mut)}}a.seg:hover{{color:var(--acc)}}
-.pill.mut{{color:var(--mut)}}.warn{{color:var(--warn)}}#sr td button{{padding:1px 8px;font-size:12px}}
+.pill.mut{{color:var(--mut)}}.warn{{color:var(--warn)}}.brk{{word-break:break-word}}#sr td.small{{word-break:break-word}}#sr td button{{padding:1px 8px;font-size:12px}}
 </style>
 <div class=page>
 <header><h1>athenafs</h1><span id=pill class="pill {pillcls}">{state}</span></header>
@@ -845,6 +845,14 @@ a{{color:var(--acc)}}a.seg{{color:inherit;text-decoration:none;border-bottom:1px
 <input id=q type=search placeholder="part of a file or folder name; several words: all must match" style="width:100%" autocomplete=off>
 <div class="mut small" style="margin-top:4px">Click a folder in a result to list everything under it (<code>folder:path</code>); "Cache" reads files into the cache.</div>
 <div id=srmsg style="margin-top:8px"></div><div id=sr class="small" style="margin-top:8px"></div>
+</section>
+<section class=card><h2>Largest in the cache</h2>
+<div class=add><span class="mut small">by</span>
+<label class=small><input type=radio name=uby value=file checked> file</label>
+<label class=small><input type=radio name=uby value=folder> folder</label>
+<label class=small><input type=radio name=uby value=torrent> torrent</label>
+<span id=utot class="mut small"></span></div>
+<div id=ures class="small wrap"></div>
 </section>
 <main id=m>
 {msg}
@@ -871,7 +879,7 @@ a{{color:var(--acc)}}a.seg{{color:inherit;text-decoration:none;border-bottom:1px
 <button class=danger {dis} data-confirm="Erase ALL local data? The service restarts (a few seconds) and reads in progress fail.">Erase everything</button></form>
 <p class="mut small">Erasing or removing restarts the service: the share is unavailable for a few seconds and reads in progress fail.
 It does not delete the .torrent files of the setup or the configuration.</p></div></details></section>
-<p class="mut small">Refreshes every 5 s · <a href=/api>API</a></p>
+<p class="mut small">Refreshes every 5 s · <a href=/api/docs>API documentation</a> · <a href=/api>raw status</a></p>
 </div>
 <script>
 const esc=s=>s.replace(/[&<>"']/g,c=>({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[c]));
@@ -888,7 +896,8 @@ function row(f){{
   const label=f.status=='partial'?'partial '+pct+'%':f.status;
   const hl='<div class="small '+(f.dead?'warn':'mut')+'">'+esc(f.health_text||'')+'</div>';
   const btn=['cached','queued','caching'].includes(f.status)?'':'<button class=cache data-p="'+esc(f.path)+'">Cache</button>';
-  return '<tr><td class=small>'+pathHtml(f.path)+hl+'</td><td class=n>'+sz(f.size)+'</td><td class=n><span class="pill '+(badge[f.status]||'')+'">'+esc(label)+'</span></td><td class=n>'+btn+'</td></tr>';
+  const lk=' <span class=mut>· <a href="'+esc(f.smb_url)+'" title="'+esc(f.smb_url)+'">open</a> · <a href=# data-copy="'+esc(f.unc_path)+'" title="'+esc(f.unc_path)+'">copy \\\\\\\\ path</a></span>';
+  return '<tr><td class=small>'+pathHtml(f.path)+lk+hl+'</td><td class=n>'+sz(f.size)+'</td><td class=n><span class="pill '+(badge[f.status]||'')+'">'+esc(label)+'</span></td><td class=n>'+btn+'</td></tr>';
 }}
 async function runSearch(more){{
   const q=document.getElementById('q').value.trim(), out=document.getElementById('sr');
@@ -911,11 +920,31 @@ async function cache(d){{
     +(r.no_peer?'. Warning: '+r.no_peer+' of them belong to torrents where the last health check found no peer at all':'')))+'</div>';
   runSearch(false);
 }}
+async function loadUsage(){{
+  const by=document.querySelector('input[name=uby]:checked').value;
+  const r=await (await fetch('/api/usage?limit=20&by='+by)).json();
+  document.getElementById('utot').textContent=r.total+' '+by+(r.total==1?'':'s')+' with cached data, '+sz(r.total_cached);
+  document.getElementById('ures').innerHTML='<table>'+r.results.map(x=>{{
+    const name=by=='torrent'?esc(x.name)+' <span class=mut>'+esc(x.folder)+' · '+x.hash.slice(0,8)+'</span>':pathHtml(x.path);
+    const what=by=='torrent'?('hash='+x.hash):('path='+encodeURIComponent(x.path));
+    const L=x.smb_url?x:(x.location||{{}});
+    const loc=L.smb_url?' <span class=mut>· <a href="'+esc(L.smb_url)+'" title="'+esc(L.smb_url)+'">open</a> · <a href=# data-copy="'+esc(L.unc_path)+'" title="'+esc(L.unc_path)+'">copy \\\\\\\\ path</a></span>':'';
+    return '<tr><td class=brk>'+name+loc+'</td><td class=n>'+sz(x.cached)
+      +(x.size?' <span class=mut>of '+sz(x.size)+'</span>':'')+'</td><td class=n><button class=danger data-uerase="'+esc(what)+'">Erase</button></td></tr>'}}).join('')+'</table>';
+}}
+document.querySelectorAll('input[name=uby]').forEach(i=>i.addEventListener('change',loadUsage));
+loadUsage(); setInterval(()=>{{if(!document.querySelector('#ures [data-armed]'))loadUsage()}},30000);
 document.getElementById('q').addEventListener('input',()=>{{clearTimeout(st);st=setTimeout(()=>runSearch(false),250)}});
 document.addEventListener('click',e=>{{
   const t=e.target;
-  if(t.classList.contains('seg')||t.classList.contains('browse')){{e.preventDefault();const q=document.getElementById('q');q.value='folder:'+t.dataset.f;q.scrollIntoView({{block:'center'}});runSearch(false)}}
+  if(t.dataset.copy!==undefined){{e.preventDefault();navigator.clipboard?.writeText(t.dataset.copy).then(()=>{{t.textContent='copied'}},()=>{{prompt('Path:',t.dataset.copy)}})}}
+  else if(t.classList.contains('seg')||t.classList.contains('browse')){{e.preventDefault();const q=document.getElementById('q');q.value='folder:'+t.dataset.f;q.scrollIntoView({{block:'center'}});runSearch(false)}}
   else if(t.classList.contains('cache'))cache({{path:t.dataset.p}});
+  else if(t.dataset.uerase!==undefined){{
+    if(!t.dataset.armed){{t.dataset.armed=1;t.textContent='Confirm erase (restarts the service)';setTimeout(()=>{{if(t.isConnected){{delete t.dataset.armed;t.textContent='Erase'}}}},6000)}}
+    else{{t.disabled=true;t.textContent='Erasing…';fetch('/api/erase',{{method:'POST',headers:{{'Content-Type':'application/x-www-form-urlencoded'}},body:t.dataset.uerase}})
+      .then(r=>r.json()).then(r=>{{t.textContent=r.error?r.error:'Erasing: see the message above';setTimeout(loadUsage,15000)}})}}
+  }}
   else if(t.dataset.confirm!==undefined){{  // in-page confirmation (a confirm() pop-up can be blocked silently)
     if(!t.dataset.armed){{e.preventDefault();t.dataset.armed=1;t.dataset.label=t.textContent;t.textContent='Confirm: '+t.dataset.confirm;
       setTimeout(()=>{{if(t.isConnected){{delete t.dataset.armed;t.textContent=t.dataset.label}}}},6000)}}
@@ -1062,6 +1091,235 @@ def render(s=None):
                        nawake=sum(1 for x in s["sources"] if x.get("awake")))
 
 
+
+# ---------------------------------------------------------------- API (JSON): status, torrents, files, usage, erase
+
+SMB_SHARE = os.environ.get("ATHENAFS_SMB_SHARE", "torrents")
+
+
+def smb_host():
+    """Name clients use for the SMB server: ATHENAFS_SMB_HOST, else the host of the page's address."""
+    return os.environ.get("ATHENAFS_SMB_HOST") or urllib.parse.urlparse(PAGE_URL).hostname or "localhost"
+
+
+def locations(path, is_dir=False):
+    """Where a share path is found from a client: smb:// URL (macOS Finder, Linux) and UNC path (Windows)."""
+    h = smb_host()
+    p = path.strip("/")
+    return {"share_path": p + ("/" if is_dir and p else ""),
+            "smb_url": f"smb://{h}/{SMB_SHARE}/" + urllib.parse.quote(p) + ("/" if is_dir and p else ""),
+            "unc_path": f"\\\\{h}\\{SMB_SHARE}\\" + p.replace("/", "\\")}
+
+
+def torrent_root(route, t, flat):
+    """Share path of the top folder of torrent t (or of its single file)."""
+    return share_path(route, t, "", flat).rstrip("/") if t["multi"] else f"{route}/{t['name']}"
+
+
+def api_status():
+    s = served.get("data") or snapshot()
+    a = activity_view()
+    srcs = s["sources"]
+    checked = [health[x["hash"]] for x in srcs if x["hash"] in health]
+    return {"service": s["state"], "message": s["message"], "commit": os.environ.get("ATHENAFS_COMMIT", ""),
+            "cache": {"used": s["total_cache"], "cap": (s["capacity"] or 0) * 1_000_000, "unattributed": s["unknown"]},
+            "disk": {"total": s["disk_total"], "free": s["disk_free"]},
+            "torrents": {"total": len(srcs), "mounted": sum(x["status"].startswith("mounted") for x in srcs),
+                         "awake": sum(1 for x in srcs if x.get("awake")),
+                         "waiting_for_metadata": sum(x["status"] == "waiting for metadata" for x in srcs),
+                         "folders": len({x["route"] for x in srcs})},
+            "health": {"checked": len(checked), "with_seeders": sum(1 for x in checked if x["seeders"]),
+                       "no_peer_found": sum(1 for x in checked if not x["known"] and not x["connected"])},
+            "transfer": {"down": a["down"], "up": a["up"]},
+            "prefetch": {"queued": a["prefetch"]["queued"], "active": len(a["prefetch"]["active"]),
+                         "done": a["prefetch"]["done"], "failed": len(a["prefetch"]["failed"])},
+            "smb": locations("", True)}
+
+
+def torrent_rows(folder="", hash_=""):
+    s = served.get("data") or snapshot()
+    tp = torrent_pieces(); flat = flat_folders(tp)
+    cached = {i["hash"]: i for i in s["items"]}
+    out = []
+    for x in s["sources"]:
+        if (folder and x["route"] != folder) or (hash_ and x["hash"] != hash_):
+            continue
+        t = tp.get(x["hash"]); c = cached.get(x["hash"], {})
+        row = {"id": x["id"], "hash": x["hash"], "name": x["name"], "folder": x["route"], "kind": x["kind"],
+               "status": x["status"], "awake": bool(x.get("awake")), "size": x["size"], "cached": c.get("cache", 0),
+               "pieces_cached": c.get("pieces", f"0/{t['npieces']}" if t else ""), "files": len(t["files"]) if t else None,
+               "health": health.get(x["hash"]), "health_text": health_text(x["hash"])}
+        if t:
+            row["location"] = locations(torrent_root(x["route"], t, flat.get(x["route"])), t["multi"])
+        out.append(row)
+    return out
+
+
+def api_file(path):
+    c = db()
+    try:
+        r = c.execute("SELECT hash, path, tpath, size, off FROM files WHERE path = ?", (path.strip("/"),)).fetchone()
+    finally:
+        c.close()
+    if not r:
+        return {"error": "no such file in the share (folders: use /api/search?q=folder:path)"}
+    h, p, tpath, size, off = r
+    tp = torrent_pieces()
+    st, have = file_state(h, p, off, size, tp, set(cache_files()))
+    t = tp.get(h)
+    return {"path": p, "size": size, "status": st, "cached": have, "torrent": {"hash": h, "name": t["name"] if t else "",
+            "path_in_torrent": tpath}, "health": health.get(h), "health_text": health_text(h), **locations(p)}
+
+
+def usage(by="file", limit=50, offset=0, depth=3, folder=""):
+    """What takes the most room in the cache, by file, folder (share path cut at `depth` levels) or torrent."""
+    limit, offset, depth = max(1, min(int(limit), 1000)), max(0, int(offset)), max(1, int(depth))
+    files = cache_files(); tp = torrent_pieces(); sources = load_sources(); flat = flat_folders(tp, sources)
+    route = {source_hash(x): x["route"] for x in sources}
+    agg = {}
+    for h, owners in piece_owners(files).items():
+        for ih, i in owners:
+            t = tp.get(ih)
+            if not t:
+                continue
+            if by == "torrent":
+                a = agg.setdefault(ih, {"hash": ih, "name": t["name"], "folder": route.get(ih, "?"), "size": t["total"], "cached": 0})
+                a["cached"] += files[h]
+                continue
+            for k, part in files_of_piece(t, i, files[h]):
+                fp, _, fl = t["files"][k]
+                if is_padding(fp):
+                    continue
+                sp = share_path(route.get(ih, "?"), t, fp, flat.get(route.get(ih)))
+                if folder and not sp.startswith(folder.strip("/") + "/"):
+                    continue
+                if by == "folder":
+                    parts = sp.split("/")[:-1][:depth]
+                    key = "/".join(parts)
+                    a = agg.setdefault(key, {"path": key, "cached": 0, "files": set()})
+                    a["files"].add(sp)
+                else:
+                    key = sp
+                    a = agg.setdefault(key, {"path": sp, "hash": ih, "size": fl, "cached": 0})
+                a["cached"] += part
+    rows = sorted(agg.values(), key=lambda a: -a["cached"])
+    for a in rows[offset:offset + limit]:
+        if by == "folder":
+            a["files"] = len(a["files"]); a.update(locations(a["path"], True))
+        elif by == "file":
+            a.update(locations(a["path"])); a["health_text"] = health_text(a["hash"])
+        else:
+            t = tp[a["hash"]]
+            a["location"] = locations(torrent_root(a["folder"], t, flat.get(a["folder"])), t["multi"])
+    page = rows[offset:offset + limit]
+    return {"by": by, "total": len(rows), "total_cached": sum(a["cached"] for a in rows), "offset": offset, "results": page}
+
+
+def erase_targets(path="", hash_=""):
+    """[(info-hash, path in the torrent)] for a share path (file or folder) or a whole torrent."""
+    if hash_:
+        return [(hash_, "")] if hash_ in torrent_pieces() else []
+    p = path.strip("/")
+    if not p:
+        return []
+    c = db()
+    try:
+        rows = c.execute("SELECT hash, path, tpath FROM files WHERE path = ? OR (path >= ? AND path < ?) GROUP BY hash",
+                         (p, p + "/", p + "/\U0010ffff")).fetchall()
+    finally:
+        c.close()
+    out = []
+    for h, sp, tpath in rows:
+        if sp == p:
+            out.append((h, tpath))   # a file
+            continue
+        rel = sp[len(p) + 1:]        # inside the folder
+        if tpath == rel or not tpath.endswith("/" + rel):
+            out.append((h, ""))      # the folder holds the whole torrent (or more)
+        else:
+            out.append((h, tpath[:-len(rel) - 1]))
+    return out
+
+
+def erase_many(targets):
+    """Erase several (torrent, path) targets with one restart."""
+    tp = torrent_pieces()
+
+    def job():
+        wanted, kept = set(), 0
+        for ih, p in targets:
+            w, k = pieces_to_erase(tp[ih], p)
+            wanted |= w; kept += k
+        n, sz = delete_pieces(wanted)
+        rest = f"; {kept} edge piece(s) kept, shared with neighbouring files that were not chosen" if kept else ""
+        return f"erased: {n} pieces, {sz / 1e6:.0f} MB ({len(targets)} target(s)){rest}"
+    exclusive(job)
+
+
+API_DOC = [
+    # (method, path, parameters, description)
+    ("GET", "/api/status", "", "Summary: service, cache, disk, torrents (mounted, awake, waiting), health, transfer, prefetch, SMB address."),
+    ("GET", "/api/torrents", "folder (optional)", "Every torrent: folder, status, awake, size, cached, health, location of its top folder in the share."),
+    ("GET", "/api/torrents/{hash}", "", "One torrent, with its largest cached files."),
+    ("GET", "/api/search", "q (words, all must match; or folder:path), limit (≤ 500), offset",
+     "Files whose path contains every word. Each result: size, status (cached, partial, not cached, downloading, queued, caching), cached bytes, health, smb_url, unc_path."),
+    ("GET", "/api/file", "path (as in the share)", "One file: status, cached bytes, torrent, health, smb_url, unc_path."),
+    ("GET", "/api/usage", "by (file, folder or torrent), depth (folder levels, default 3), folder (only under this share path), limit, offset",
+     "What takes the most room in the cache, largest first."),
+    ("GET", "/api/activity", "", "Rates per torrent, files that received data in the last 30 s, prefetch queue."),
+    ("GET", "/api", "", "Full status as used by the page (sources, cache tree, settings)."),
+    ("POST", "/api/prefetch", "path (repeatable) or q (a search)", "Read files into the cache ahead of time. Refused when larger than 90 % of the cache cap."),
+    ("POST", "/api/prefetch/cancel", "", "Empty the prefetch queue and stop the reads in progress."),
+    ("POST", "/api/erase", "path (file or folder of the share) or hash (whole torrent)",
+     "Erase cached data. Restarts the service (the share is unavailable a few seconds). Edge pieces shared with files that were not chosen are kept."),
+]
+
+
+def api_docs_html():
+    rows = "".join(f"<tr><td><code>{m}</code></td><td><code>{html.escape(p)}</code></td><td>{html.escape(a)}</td><td>{html.escape(d)}</td></tr>"
+                   for m, p, a, d in API_DOC)
+    host = html.escape(PAGE_URL.rstrip("/") or "http://localhost:8080")
+    return f"""<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>athenafs API</title>
+<style>:root{{--bg:#f6f7f9;--fg:#1b1d21;--mut:#6b7079;--line:#e3e5ea;--card:#fff}}@media (prefers-color-scheme:dark){{:root{{--bg:#111315;--fg:#e6e7e9;--mut:#9aa0a8;--line:#2c3035;--card:#1a1d20}}}}
+body{{background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,sans-serif;margin:0;padding:16px}}.page{{max-width:1040px;margin:auto}}
+table{{width:100%;border-collapse:collapse;background:var(--card)}}td,th{{text-align:left;padding:8px;border-bottom:1px solid var(--line);vertical-align:top}}
+code,pre{{font:13px ui-monospace,monospace}}pre{{background:var(--card);border:1px solid var(--line);padding:10px;overflow-x:auto}}.mut{{color:var(--mut)}}a{{color:inherit}}</style>
+<div class=page><h1>athenafs API</h1><p class=mut>JSON over HTTP. Sizes in bytes, times in unix seconds. <a href=/>Back to the page</a> · <a href=/api/openapi.json>openapi.json</a></p>
+<table><tr><th>Method</th><th>Path</th><th>Parameters</th><th>What</th></tr>{rows}</table>
+<h2>POST requests</h2><p>Form-encoded or JSON body. They must carry either an <code>Origin</code> header naming this host (the page does)
+or <code>X-Athenafs: 1</code> (scripts): a header a third-party site cannot add, so other sites cannot act on your behalf.
+When a password is set (<code>ATHENAFS_PASSWORD</code>), use basic authentication with the user <code>admin</code>.</p>
+<h2>Examples</h2><pre>curl -s '{host}/api/search?q=readme+pdf&amp;limit=5'
+curl -s '{host}/api/usage?by=folder&amp;depth=3&amp;limit=10'
+curl -s -H 'X-Athenafs: 1' --data-urlencode 'path=Some/folder/file.zip' {host}/api/prefetch
+curl -s -H 'X-Athenafs: 1' -H 'Content-Type: application/json' -d '{{"path": "Some/folder"}}' {host}/api/erase</pre></div>"""
+
+
+def api_openapi():
+    paths = {}
+    for m, p, a, d in API_DOC:
+        params = [{"name": n.strip().split(" ")[0], "in": "path" if "{" + n.strip().split(" ")[0] + "}" in p else "query",
+                   "description": n.strip()} for n in a.split(",") if n.strip()] if m == "GET" else []
+        op = {"summary": d, "responses": {"200": {"description": "JSON"}}}
+        if params:
+            op["parameters"] = params
+        if m == "POST" and a:
+            op["requestBody"] = {"description": a, "content": {"application/x-www-form-urlencoded": {}, "application/json": {}}}
+        paths.setdefault(p, {})[m.lower()] = op
+    return {"openapi": "3.0.3", "info": {"title": "athenafs", "version": os.environ.get("ATHENAFS_COMMIT", "")}, "paths": paths}
+
+
+def body_params(raw, ctype):
+    """POST body as {name: [values]}, form-encoded or JSON."""
+    if "json" in (ctype or ""):
+        try:
+            d = json.loads(raw or b"{}")
+        except ValueError:
+            return {}
+        return {k: (v if isinstance(v, list) else [v]) for k, v in d.items()} if isinstance(d, dict) else {}
+    return urllib.parse.parse_qs(raw.decode("utf-8", "replace"))
+
+
 class H(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
 
@@ -1075,7 +1333,7 @@ class H(http.server.BaseHTTPRequestHandler):
                 ok = hmac.compare_digest(u, "admin") and hmac.compare_digest(m, PASSWORD)
             except Exception:
                 ok = False
-        if ok and self.command == "POST":
+        if ok and self.command == "POST" and self.headers.get("X-Athenafs") != "1":   # scripts: see /api/docs
             o = self.headers.get("Origin") or self.headers.get("Referer") or ""
             ok = bool(o) and o.split("//", 1)[-1].split("/", 1)[0] == self.headers.get("Host", "")
         if not ok:
@@ -1086,19 +1344,39 @@ class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         if not self.authorized():
             return
-        if self.path == "/api":
-            body = served["json"] or json.dumps(snapshot()).encode(); ct = "application/json"
-        elif self.path.startswith("/api/search"):
-            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-            one = lambda k, d: (q.get(k) or [d])[0]
-            try:
-                res = search(one("q", ""), one("limit", "50"), one("offset", "0"))
-            except ValueError:
-                res = {"error": "limit and offset must be integers"}
-            body = json.dumps(res).encode(); ct = "application/json"
-        elif self.path == "/api/activity":
-            body = json.dumps(activity_view()).encode(); ct = "application/json"
-        else:
+        u = urllib.parse.urlparse(self.path)
+        q = urllib.parse.parse_qs(u.query)
+        one = lambda k, d="": (q.get(k) or [d])[0]
+        res, body, ct = None, None, "application/json"
+        try:
+            if u.path == "/api":
+                body = served["json"] or json.dumps(snapshot()).encode()
+            elif u.path == "/api/search":
+                res = search(one("q"), one("limit", "50"), one("offset", "0"))
+            elif u.path == "/api/activity":
+                res = activity_view()
+            elif u.path == "/api/status":
+                res = api_status()
+            elif u.path == "/api/torrents":
+                res = {"torrents": torrent_rows(folder=one("folder"))}
+            elif u.path.startswith("/api/torrents/"):
+                h = u.path.rsplit("/", 1)[-1].lower()
+                rows = torrent_rows(hash_=h)
+                res = dict(rows[0], largest_cached_files=[f for f in usage("file", 1000)["results"] if f["hash"] == h][:20]) \
+                    if rows else {"error": "unknown torrent"}
+            elif u.path == "/api/file":
+                res = api_file(one("path"))
+            elif u.path == "/api/usage":
+                res = usage(one("by", "file"), one("limit", "50"), one("offset", "0"), one("depth", "3"), one("folder"))
+            elif u.path == "/api/openapi.json":
+                res = api_openapi()
+            elif u.path == "/api/docs":
+                body = api_docs_html().encode(); ct = "text/html; charset=utf-8"
+        except ValueError:
+            res = {"error": "limit, offset and depth must be integers"}
+        if res is not None:
+            body = json.dumps(res).encode()
+        if body is None:   # the page
             body = served["html"] or render().encode(); ct = "text/html; charset=utf-8"
         self.send_response(200); self.send_header("Content-Type", ct)
         self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
@@ -1111,9 +1389,21 @@ class H(http.server.BaseHTTPRequestHandler):
             self.send_response(413); self.send_header("Content-Length", "0"); self.end_headers(); return
         raw = self.rfile.read(n)
         go = lambda fn, *a: threading.Thread(target=fn, args=a, daemon=True).start()
-        if self.path in ("/api/prefetch", "/api/prefetch/cancel"):
-            q = urllib.parse.parse_qs(raw.decode("utf-8", "replace"))
-            res = prefetch_cancel() if self.path.endswith("cancel") else prefetch_add((q.get("q") or [""])[0], q.get("path") or [])
+        if self.path in ("/api/prefetch", "/api/prefetch/cancel", "/api/erase"):
+            q = body_params(raw, self.headers.get("Content-Type"))
+            one = lambda k: str((q.get(k) or [""])[0])
+            if self.path == "/api/erase":
+                h = one("hash").lower()
+                targets = erase_targets(one("path"), h if re.fullmatch(r"[0-9a-f]{40}", h) else "")
+                if targets and state["state"] == "running":
+                    go(erase_many, targets)
+                    res = {"erasing": len(targets), "note": "the service restarts; see /api/status for the result"}
+                else:
+                    res = {"error": "nothing to erase there" if not targets else "the service is busy, retry in a few seconds"}
+            elif self.path.endswith("cancel"):
+                res = prefetch_cancel()
+            else:
+                res = prefetch_add(one("q"), [str(x) for x in q.get("path") or []])
             body = json.dumps(res).encode()
             self.send_response(200); self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
@@ -1397,7 +1687,7 @@ def search(q, limit=50, offset=0):
     for h, path, tpath, size, off in rows:
         st, have = file_state(h, path, off, size, tp, cached)
         out.append({"path": path, "size": size, "hash": h, "torrent_path": tpath, "cached": have, "status": st,
-                    "health": health.get(h), "health_text": health_text(h), "dead": looks_dead(h)})
+                    "health": health.get(h), "health_text": health_text(h), "dead": looks_dead(h), **locations(path)})
     return {"query": q, "total": min(total, SEARCH_CAP), "total_capped": total > SEARCH_CAP, "total_size": total_size,
             "offset": offset, "results": out}
 
@@ -1502,7 +1792,7 @@ def snapshotter():
     while True:
         try:
             s = snapshot()
-            served.update(at=time.time(), json=json.dumps(s).encode(), html=render(s).encode())
+            served.update(at=time.time(), data=s, json=json.dumps(s).encode(), html=render(s).encode())
         except Exception as e:
             print("snapshot error:", e)
         time.sleep(3)

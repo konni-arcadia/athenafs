@@ -243,6 +243,22 @@ pieces, 443,000 files, 258 TB).
 - **Build:** Go modules are downloaded in their own layer before the patches; two builds had failed on a DNS/IPv6 hiccup of
   the host while downloading them.
 
+## API (2026-10-21)
+
+`/api/docs` lists the endpoints (one table in `admin.py`, `API_DOC`, also served as `/api/openapi.json`).
+- **Locations:** every file, folder or torrent root comes with `smb_url` (percent-encoded, opens in the Finder) and
+  `unc_path` (Windows), built from `ATHENAFS_SMB_HOST` or the host of `ATHENAFS_PAGE_URL`, and the share name (`torrents`).
+- **Usage:** `/api/usage?by=file|folder|torrent` adds the cached pieces per file (a piece spanning two files is split by
+  bytes), per share folder cut at `depth` levels, or per torrent; computed from the cached pieces only.
+- **Erase by share path:** a file or folder of the share is mapped back to (torrent, path inside it) through the index; a
+  folder that holds whole torrents erases them whole; several torrents are erased with one restart. Checked: a sub-folder
+  of a large torrent maps to that torrent and its inner folder, `librivox` to the whole torrent, a file to itself; a file erased through the API
+  went from cached to partial (its two edge pieces are shared with neighbouring files).
+- **CSRF:** POST requests accept a matching `Origin` (the page) or `X-Athenafs: 1` (scripts); without either, 401. A third-
+  party site cannot add a custom header without the browser asking this server first, which it does not allow.
+- **Confirmations:** `confirm()` pop-ups were blocked silently in an embedded browser, so "Cache all" did nothing; every
+  confirmation is now a second click on the same button, and the 5 s refresh waits while one is armed.
+
 ## Cache cap and disk space (2026-10-21)
 
 The cap on the cache (`global_cache_size`, in MB, in `core/config.yaml`) is now shown against the disk and can be changed from the
