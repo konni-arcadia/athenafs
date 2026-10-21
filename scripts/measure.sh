@@ -15,9 +15,10 @@ logcount() { docker logs athenafs-core 2>&1 | grep -c "$1" || true; }
 since() { echo $(( $(date +%s) - $1 )); }
 
 # start-up: restart the core, time the mount and the time until no torrent has been added for 30 s
-docker restart athenafs-core >/dev/null
+docker restart -t 60 athenafs-core >/dev/null   # enough time to unmount cleanly (Docker's default 10 s is not)
 t0=$(date +%s)
-until docker exec athenafs-core sh -c 'grep -q " /mnt/torrents/fs fuse" /proc/mounts' 2>/dev/null; do sleep 1; done
+# mounted = the folder can be listed (a stale mount is in /proc/mounts too, but fails)
+until docker exec athenafs-core sh -c 'ls /mnt/torrents/fs >/dev/null 2>&1' 2>/dev/null; do sleep 1; done
 t_mount=$(since $t0)
 last=-1; quiet=0; t_added=0
 while [ $quiet -lt 30 ]; do

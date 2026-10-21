@@ -8,6 +8,8 @@ services:
     build: ./core
     container_name: athenafs-core
     restart: "no"
+    stop_grace_period: 60s   # Distribyted needs more than Docker's default 10 s to stop with hundreds of torrents; killed
+                             # before, it leaves a dead FUSE mount behind (Transport endpoint is not connected)
     devices: ["/dev/fuse:/dev/fuse"]
     cap_add: [SYS_ADMIN]
     security_opt: ["apparmor:unconfined"]

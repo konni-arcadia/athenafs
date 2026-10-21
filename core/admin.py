@@ -69,8 +69,7 @@ def parse_torrent(raw):
     start = raw.index(b"4:info") + 6
     _, end = bdec(raw, start)
     ih = hashlib.sha1(raw[start:end]).hexdigest()
-    p = info[b"pieces"]
-    plist = [p[i:i + 20].hex() for i in range(0, len(p), 20)]
+    p = bytes(info[b"pieces"])   # piece hashes, 20 bytes each: kept as one block (a list of strings costs ~10x more)
     if b"files" in info:
         fl, off = [], 0
         for f in info[b"files"]:
@@ -79,8 +78,24 @@ def parse_torrent(raw):
         total = off
     else:
         fl, total = [(info[b"name"].decode("utf-8", "replace"), 0, info[b"length"])], info[b"length"]
-    return {"hash": ih, "name": info[b"name"].decode("utf-8", "replace"), "total": total, "hs": set(plist), "multi": b"files" in info,
-            "plist": plist, "pl": info[b"piece length"], "files": fl}
+    return {"hash": ih, "name": info[b"name"].decode("utf-8", "replace"), "total": total, "multi": b"files" in info,
+            "pieces": p, "npieces": len(p) // 20, "pl": info[b"piece length"], "files": fl}
+
+
+def piece(t, i):
+    """Hash (hex, the name of its file in the cache) of piece i of torrent t."""
+    return t["pieces"][20 * i:20 * i + 20].hex()
+
+
+def files_of_piece(t, i, size):
+    """(file index, bytes of piece i in that file) for every file the piece overlaps; size = the piece's size."""
+    o = i * t["pl"]; k = max(0, bisect.bisect_right(t["offsets"], o) - 1)
+    while k < len(t["files"]) and t["files"][k][1] < o + size:
+        _, fo, fl = t["files"][k]
+        part = min(o + size, fo + fl) - max(o, fo)
+        if part > 0:
+            yield k, part
+        k += 1
 
 
 _parsed = {}   # path -> (mtime, size, parsed torrent): a .torrent is parsed again only when it changes
@@ -372,6 +387,7 @@ def write_root_files():
 
 
 def start():
+    unmount_fuse()   # a stale mount from a killed run would hide the new one
     write_root_files()
     generate_config(load_sources())
     state["proc"] = subprocess.Popen(["/bin/distribyted", "--config", GENERATED, "--http-port", "4444"])
@@ -386,13 +402,18 @@ def stop():
             p.wait(30)
         except subprocess.TimeoutExpired:
             p.kill(); p.wait()
-    # only unmount if a FUSE filesystem is still there: MOUNT's parent is also the host's bind mount (rshared),
-    # an unconditional umount would propagate to the host and remove it.
-    for line in open("/proc/mounts"):
-        c = line.split()
-        if len(c) > 2 and c[1] == MOUNT and c[2].startswith("fuse"):
-            subprocess.run(["umount", "-l", MOUNT], capture_output=True)
+    unmount_fuse()
     state["proc"] = None
+
+
+def unmount_fuse():
+    """Unmount every FUSE filesystem left at MOUNT (a stale one stays when Distribyted was killed, e.g. by a too short stop
+    timeout, and mounts can be stacked). Only FUSE ones: MOUNT's parent is also the host's bind mount (rshared), an
+    unconditional umount would propagate to the host and remove it."""
+    for _ in range(5):
+        if not any(len(c) > 2 and c[1] == MOUNT and c[2].startswith("fuse") for c in (l.split() for l in open("/proc/mounts"))):
+            return
+        subprocess.run(["umount", "-l", MOUNT], capture_output=True)
 
 
 def exclusive(fn):
@@ -419,7 +440,7 @@ def pieces_to_erase(t, path):
     """(pieces to erase, number of pieces kept because shared with an unchosen file).
     path '' = the whole torrent; otherwise a file, or a folder (prefix). A piece straddling two files
     is only erased if every file it covers is chosen."""
-    fl, pl, plist = t["files"], t["pl"], t["plist"]
+    fl, pl = t["files"], t["pl"]
     chosen = {i for i, (c, o, n) in enumerate(fl) if path == "" or c == path or c.startswith(path + "/")}
     starts = [o for _, o, _ in fl]; ends = [o + n for _, o, n in fl]
 
@@ -437,7 +458,7 @@ def pieces_to_erase(t, path):
         if n > 0:
             cand.update(range(o // pl, (o + n - 1) // pl + 1))
     ok = {p for p in cand if owners(p) <= chosen}
-    return {plist[p] for p in ok}, len(cand) - len(ok)
+    return {piece(t, p) for p in ok}, len(cand) - len(ok)
 
 
 def delete_pieces(hashes):
@@ -613,19 +634,17 @@ def remove_source(sid, erase_data):
 
 # ---------------------------------------------------------------- status
 
-def tree(t, files):
-    """Folders/files of a torrent that have cached data (size ≈ cached pieces covering the file)."""
-    plist, pl = t["plist"], t["pl"]
-    cb = [0]
-    for h in plist:
-        cb.append(cb[-1] + files.get(h, 0))
+def tree(t, mine):
+    """Folders/files of a torrent that have cached data (size ≈ cached pieces covering the file).
+    mine = [(piece index, cached bytes)] of this torrent: the work is proportional to what is cached, not to the torrent."""
+    per_file = {}
+    for i, size in mine:
+        for k, _ in files_of_piece(t, i, t["pl"]):
+            per_file[k] = per_file.get(k, 0) + size
     root = {"name": "", "path": "", "size": 0, "children": {}}
-    for path, o, n in t["files"]:
-        if n <= 0 or is_padding(path):
-            continue
-        a, b = o // pl, (o + n - 1) // pl
-        sz = cb[b + 1] - cb[a]
-        if sz <= 0:
+    for k, sz in sorted(per_file.items()):
+        path = t["files"][k][0]
+        if t["files"][k][2] <= 0 or is_padding(path):
             continue
         nd = root; nd["size"] += sz; cur = ""
         for comp in path.split("/"):
@@ -657,19 +676,23 @@ def hidden_files(key, tp):
 
 
 def snapshot():
-    tp = torrent_pieces(); files = cache_files(); cached = set(files)
+    tp = torrent_pieces(); files = cache_files()
+    by_torrent = {}   # info-hash -> [(piece index, bytes)] of its cached pieces
+    for h, owners in piece_owners(files).items():
+        for ih, i in owners:
+            by_torrent.setdefault(ih, []).append((i, files[h]))
     routes = activity["routes"] if time.time() - activity["at"] < 130 else (api("/routes") or [])
     live = {t["hash"]: (r["name"], t) for r in routes for t in (r.get("torrentStats") or [])}
     items = []
     for ih, t in tp.items():
-        mine = t["hs"] & cached
-        sz = sum(files[h] for h in mine)
+        mine = by_torrent.get(ih, [])
+        sz = sum(n for _, n in mine)
         route, st_ = live.get(ih, ("?", {}))
         if route == "?" and sz == 0:
             continue  # .torrent present but not mounted, nothing cached
         items.append({"hash": ih, "name": t["name"], "route": route, "total": t["total"], "cache": sz,
-                      "pieces": f"{len(mine)}/{len(t['hs'])}", "peers": st_.get("peers", 0),
-                      "tree": tree(t, files) if sz else None})
+                      "pieces": f"{len(mine)}/{t['npieces']}", "peers": st_.get("peers", 0),
+                      "tree": tree(t, mine) if sz else None})
     srcs, sources = [], load_sources()
     # in a folder shared by several torrents, a path present in more than one is served from only one of them
     hidden = hidden_files(tuple((s["id"], s["route"], source_hash(s)) for s in sources if source_hash(s) in tp), tp)
@@ -688,7 +711,7 @@ def snapshot():
                      "name": tp[h]["name"] if h in tp else (magnet_dn(s["value"]) if s["kind"] == "magnet" else "")})
     st = api("/status") or {}
     total_d, free_d = disk()
-    unknown = sum(files.values()) - sum(i["cache"] for i in items)
+    unknown = sum(files.values()) - sum(i["cache"] for i in items) if pieces_ready["done"] else 0
     return {"state": state["state"], "message": state["message"], "total_cache": sum(files.values()),
             "capacity": st.get("cacheCapacity"), "items": items, "sources": srcs, "unknown": unknown,
             "disk_total": total_d, "disk_free": free_d, "max_cap_mb": max_cap_mb(), "settings": load_settings(),
@@ -868,8 +891,8 @@ def ask_form(field, value, dis, label, question, current):
             f"<button {dis}>{label}</button></form>")
 
 
-def render():
-    s = snapshot(); dis = "" if s["state"] == "running" else "disabled"
+def render(s=None):
+    s = s or snapshot(); dis = "" if s["state"] == "running" else "disabled"
     rows = ""
     for i in s["items"]:
         if not i["cache"]:
@@ -985,7 +1008,7 @@ class H(http.server.BaseHTTPRequestHandler):
         if not self.authorized():
             return
         if self.path == "/api":
-            body = json.dumps(snapshot()).encode(); ct = "application/json"
+            body = served["json"] or json.dumps(snapshot()).encode(); ct = "application/json"
         elif self.path.startswith("/api/search"):
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             one = lambda k, d: (q.get(k) or [d])[0]
@@ -997,7 +1020,7 @@ class H(http.server.BaseHTTPRequestHandler):
         elif self.path == "/api/activity":
             body = json.dumps(activity_view()).encode(); ct = "application/json"
         else:
-            body = render().encode(); ct = "text/html; charset=utf-8"
+            body = served["html"] or render().encode(); ct = "text/html; charset=utf-8"
         self.send_response(200); self.send_header("Content-Type", ct)
         self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
 
@@ -1045,7 +1068,6 @@ def sampler():
     """Every 2 s: rates per torrent (from Distribyted's cumulative counters) and the files whose pieces just reached the cache.
     The only regular caller of Distribyted's /routes, so its numbers are not disturbed by page refreshes."""
     prev, prev_net, prev_pieces, recent = {}, None, None, []
-    piece_owner, owner_key = {}, None
     while True:
         time.sleep(2)
         now = time.time()
@@ -1083,25 +1105,17 @@ def sampler():
             new = pieces.keys() - prev_pieces.keys()
             if new:
                 tp = torrent_pieces()
-                key = tuple(sorted(tp))
-                if key != owner_key:
-                    piece_owner, owner_key = {}, key
-                    for ih, t in tp.items():
-                        for i, h in enumerate(t["plist"]):
-                            piece_owner.setdefault(h, []).append((ih, i))
+                piece_owner = piece_owners(new)
                 route_of = {x["hash"]: x["route"] for x in rows}
                 flat = flat_folders(tp)
                 for h in new:
                     for ih, i in piece_owner.get(h, ()):
-                        t = tp[ih]; o = i * t["pl"]
-                        k = bisect.bisect_right(t["offsets"], o) - 1
+                        t = tp.get(ih)
                         # a piece can span several files: credit each file the part of the piece it holds
-                        while 0 <= k < len(t["files"]) and t["files"][k][1] < o + pieces[h]:
-                            path, fo, fl = t["files"][k]
-                            part = min(o + pieces[h], fo + fl) - max(o, fo)
-                            if part > 0 and not is_padding(path):
+                        for k, part in (files_of_piece(t, i, pieces[h]) if t else ()):
+                            path = t["files"][k][0]
+                            if not is_padding(path):
                                 recent.append((now, ih, share_path(route_of.get(ih, "?"), t, path, flat.get(route_of.get(ih))), part))
-                            k += 1
         prev_pieces = pieces
         recent = [x for x in recent if x[0] > now - WINDOW]
         files = {}
@@ -1163,14 +1177,63 @@ def sync_index():
     return changed
 
 
+pieces_ready = {"done": False}   # False until every known torrent's pieces are in the table
+
+
+def sync_pieces(tp):
+    """Table piece hash -> (torrent, index) for every known torrent (on disk: 12 million pieces would cost GBs in memory).
+    Only torrents added or gone since the last run are written."""
+    c = db()
+    with c:
+        c.execute("CREATE TABLE IF NOT EXISTS ptorrents(id INTEGER PRIMARY KEY, ih TEXT UNIQUE)")
+        c.execute("CREATE TABLE IF NOT EXISTS pieces(h BLOB, t INTEGER, idx INTEGER)")
+        c.execute("CREATE INDEX IF NOT EXISTS pieces_h ON pieces(h)")
+    have = dict(c.execute("SELECT ih, id FROM ptorrents").fetchall())
+    changed = 0
+    for ih in set(have) - set(tp):
+        with c:
+            c.execute("DELETE FROM pieces WHERE t=?", (have[ih],)); c.execute("DELETE FROM ptorrents WHERE id=?", (have[ih],))
+        changed += 1
+    for ih in set(tp) - set(have):
+        t = tp[ih]; b = t["pieces"]
+        with c:
+            tid = c.execute("INSERT INTO ptorrents(ih) VALUES (?)", (ih,)).lastrowid
+            c.executemany("INSERT INTO pieces VALUES (?,?,?)", ((b[20 * i:20 * i + 20], tid, i) for i in range(t["npieces"])))
+        changed += 1
+    c.close()
+    pieces_ready["done"] = True
+    return changed
+
+
+def piece_owners(hashes):
+    """{hash (hex): [(info-hash, piece index)]} for the given cache file names; unknown hashes are left out."""
+    out, hs = {}, [h for h in hashes if len(h) == 40]
+    c = db()
+    try:
+        for k in range(0, len(hs), 500):
+            chunk = [bytes.fromhex(h) for h in hs[k:k + 500]]
+            q = ("SELECT pieces.h, ptorrents.ih, pieces.idx FROM pieces JOIN ptorrents ON ptorrents.id = pieces.t "
+                 f"WHERE pieces.h IN ({','.join('?' * len(chunk))})")
+            for h, ih, i in c.execute(q, chunk):
+                out.setdefault(h.hex(), []).append((ih, i))
+    except sqlite3.OperationalError:   # table not built yet
+        pass
+    finally:
+        c.close()
+    return out
+
+
 def indexer():
     """Keeps the index in sync: at start, and whenever the sources or the known metadata change."""
     last = None
     while True:
         try:
-            wanted, _, _ = index_wanted()
-            key = sorted(wanted.items())
+            wanted, tp, _ = index_wanted()
+            key = (sorted(wanted.items()), sorted(tp))
             if key != last:
+                t0 = time.time(); n = sync_pieces(tp)
+                if n:
+                    print(f"piece table: {n} torrents (re)indexed in {time.time() - t0:.0f} s")
                 n = sync_index()
                 if n:
                     print(f"search index: {n} torrents (re)indexed")
@@ -1210,7 +1273,7 @@ def file_state(h, path, off, size, tp, cached):
         pl = t["pl"]
         for i in range(off // pl, (off + size - 1) // pl + 1):
             total += 1
-            if t["plist"][i] in cached:
+            if piece(t, i) in cached:
                 present += 1
         have = min(size, present * pl)
     with plock:
@@ -1339,6 +1402,21 @@ def activity_view():
             "prefetch": prefetch_view()}
 
 
+served = {"at": 0, "json": b"", "html": b""}   # last snapshot, as served to the page and /api
+
+
+def snapshotter():
+    """Computes the status and the page every few seconds, so a request never waits for it (with hundreds of torrents
+    a snapshot takes seconds, and Distribyted's API can be slow while torrents are being added)."""
+    while True:
+        try:
+            s = snapshot()
+            served.update(at=time.time(), json=json.dumps(s).encode(), html=render(s).encode())
+        except Exception as e:
+            print("snapshot error:", e)
+        time.sleep(3)
+
+
 def watchdog():
     """Distribyted can die on its own (a crash, a kill): report it and restart it, unless it keeps dying."""
     crashes = []
@@ -1366,6 +1444,7 @@ def main():
     threading.Thread(target=watchdog, daemon=True).start()
     threading.Thread(target=sampler, daemon=True).start()
     threading.Thread(target=indexer, daemon=True).start()
+    threading.Thread(target=snapshotter, daemon=True).start()
     for _ in range(PREFETCH_WORKERS):
         threading.Thread(target=prefetch_worker, daemon=True).start()
     srv = http.server.ThreadingHTTPServer(("0.0.0.0", 8080), H)

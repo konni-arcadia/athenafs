@@ -15,6 +15,11 @@ export ATHENAFS_PAGE_URL
 ATHENAFS_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
 [ -z "$(git status --porcelain 2>/dev/null)" ] || ATHENAFS_COMMIT="$ATHENAFS_COMMIT-dirty"
 export ATHENAFS_COMMIT
+# a dead FUSE mount left by a killed run (stat fails with "Transport endpoint is not connected"): unmount the FUSE
+# sub-folder only, never "$DATA/mount" itself (that is the bind mount)
+while findmnt -rn -t fuse.distribyted "$DATA/mount/fs" >/dev/null && ! ls "$DATA/mount/fs" >/dev/null 2>&1; do
+  sudo umount -l "$DATA/mount/fs" || break
+done
 mkdir -p "$DATA/torrents" "$DATA/state" "$DATA/mount/fs"
 findmnt -rn "$DATA/mount" >/dev/null || sudo mount --bind "$DATA/mount" "$DATA/mount"
 sudo mount --make-rshared "$DATA/mount"
