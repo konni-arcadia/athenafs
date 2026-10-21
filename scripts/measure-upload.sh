@@ -1,4 +1,5 @@
 #!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Measures download speed and outgoing traffic for several upload caps (tc tbf on the container's eth0)
 D=${DATA:-$(cd "$(dirname "$0")/.." && pwd)/data}/mount/fs/stackexchange/stackexchange
 PID=$(docker inspect -f '{{.State.Pid}}' athenafs-core)

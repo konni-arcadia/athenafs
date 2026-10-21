@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Size of the dataset served: run inside the core container by scripts/measure.sh (after the timings, since parsing
 every .torrent costs memory and CPU). Prints: sources torrents pieces files terabytes."""
 import json, os, sys

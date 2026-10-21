@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Measures the running service and appends one row to docs/measurements.md, bound to the commit it was built from.
 # Restarts the core service (the start-up is part of the measurement). Refuses a dirty tree or a container built from
 # another commit: commit, run scripts/up.sh, then measure, then commit the new row on its own.

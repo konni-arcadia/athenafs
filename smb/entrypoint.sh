@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Creates the Samba account from SMB_USER / SMB_PASS (defaults: tor / rent), names the share SMB_SHARE (default
 # torrents), then runs smbd.
 set -e

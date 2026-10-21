@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Distribyted supervisor + status and management page.
 
 Why a supervisor: changing what Distribyted serves (adding or removing a torrent) or erasing cached pieces while it runs

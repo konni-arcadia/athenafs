@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Stops everything and releases the host mount point.
 set -eu
 cd "$(dirname "$0")/.."

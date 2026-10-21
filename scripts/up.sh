@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Prepares the host mount point, then starts everything.
 # The mount point must be a bind mount of itself with shared propagation: that is what lets the FUSE mount made
 # inside the core container show up on the host and in the SMB container, including after a restart.

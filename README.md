@@ -135,5 +135,8 @@ data/                     runtime data, not in git: torrents/ (optional .torrent
 - The patches to Distribyted are local; they are not proposed upstream.
 
 ## Licence
-Not chosen yet. Distribyted is GPL-3.0, and the patches in `core/` are derivative work of it, so any publication must be
-GPL-compatible. The repository is private for now.
+Copyright the athenafs contributors. GNU General Public License version 3 or (at your option) any later version
+(`GPL-3.0-or-later`): see `LICENSE`. Distribyted, which the patches in `core/patches/` modify, is itself GPL-3.0.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty
+of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
