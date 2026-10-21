@@ -30,6 +30,9 @@ MAX_TORRENT = 10_000_000               # bytes accepted for a .torrent file
 
 
 def _password():
+    """ATHENAFS_PASSWORD (from .env), else the file /run/admin-password (a Docker secret, for example)."""
+    if os.environ.get("ATHENAFS_PASSWORD"):
+        return os.environ["ATHENAFS_PASSWORD"]
     try:
         return open("/run/admin-password").read().strip()
     except OSError:
@@ -285,6 +288,10 @@ def generate_config(sources):
         base.append(line)
     cap = effective_cap_mb(load_settings())
     base = [re.sub(r"(global_cache_size:\s*)\d+", rf"\g<1>{cap}", l) if "global_cache_size:" in l else l for l in base]
+    for key, env in (("add_timeout", "ATHENAFS_ADD_TIMEOUT"), ("read_timeout", "ATHENAFS_READ_TIMEOUT")):   # .env overrides
+        v = os.environ.get(env, "")
+        if v.isdigit():
+            base = [re.sub(rf"({key}:\s*)\d+", rf"\g<1>{v}", l) for l in base]
     out = "".join(base).rstrip("\n") + "\n"
     if not sources:
         out += "routes: []\n"

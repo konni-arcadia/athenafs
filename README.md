@@ -15,7 +15,7 @@ runs with `SYS_ADMIN` and AppArmor unconfined, which FUSE needs: run it on a mac
 
 ## Quick start
 ```sh
-cp .env.example .env      # optional: change ports, bind addresses, SMB credentials, data location
+cp .env.example .env      # optional: every setting is in it (ports, addresses, passwords, timeouts, data location)
 sh scripts/up.sh          # prepares the host mount point, builds, starts core and smb
 ```
 Then open `http://localhost:8080/`, paste a magnet link (or the URL of a .torrent file, or pick a .torrent file) and add it.
@@ -47,12 +47,14 @@ sh scripts/down.sh        # stops everything and releases the host mount point
   header naming the page's host or `X-Athenafs: 1`, e.g.
   `curl -H 'X-Athenafs: 1' --data-urlencode 'path=folder/file' http://localhost:8080/api/prefetch`.
   The SMB host name in the locations is the host of `ATHENAFS_PAGE_URL` unless `ATHENAFS_SMB_HOST` is set.
-- There is **no authentication**. By default it listens on `127.0.0.1`; `ATHENAFS_BIND=0.0.0.0` opens it to the local network,
-  where anyone can add torrents and erase the cache. POST requests must come from the page itself (anti-CSRF).
+- **Authentication** is off unless `ATHENAFS_PASSWORD` is set (basic authentication, user `admin`, for the page and the
+  API). By default the page listens on `127.0.0.1`; `ATHENAFS_BIND=0.0.0.0` opens it to the local network, where without a
+  password anyone can add torrents and erase the cache. POST requests must come from the page itself or carry
+  `X-Athenafs: 1` (anti-CSRF).
   A URL given to the page is fetched only if it is http(s) and resolves to public addresses.
 
 ## The SMB share
-Read-only, one share `torrents`, account `tor` / `rent` by default (test credentials: set `SMB_USER` and `SMB_PASS`).
+Read-only, one share `torrents` (`SMB_SHARE`), account `tor` / `rent` by default (test credentials: set `SMB_USER` and `SMB_PASS`).
 Its root also holds two links to the web page (`.webloc` for macOS, `.url` for Windows); set `ATHENAFS_PAGE_URL` in `.env`
 if `http://<this host>.local:<port>/` is not how the network reaches it.
 By default it listens on `127.0.0.1` only; `SMB_BIND=0.0.0.0` shares it on the local network.

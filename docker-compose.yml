@@ -22,6 +22,11 @@ services:
       DISTRIBYTED_HEALTH_ORDER: /data/health-order.txt
       DISTRIBYTED_ROOT_FILES: /data/share-root      # files shown at the root of the share (links to the page)
       ATHENAFS_COMMIT: "${ATHENAFS_COMMIT:-unknown}"   # set by scripts/up.sh, checked by scripts/measure.sh
+      ATHENAFS_PASSWORD: "${ATHENAFS_PASSWORD:-}"   # page and API password (user "admin"); empty = none
+      ATHENAFS_SMB_HOST: "${ATHENAFS_SMB_HOST:-}"   # host name in the smb:// and \\host\share locations of the API
+      ATHENAFS_SMB_SHARE: "${SMB_SHARE:-torrents}"
+      ATHENAFS_ADD_TIMEOUT: "${ATHENAFS_ADD_TIMEOUT:-}"   # overrides add_timeout of core/config.yaml when set
+      ATHENAFS_READ_TIMEOUT: "${ATHENAFS_READ_TIMEOUT:-}" # overrides read_timeout of core/config.yaml when set
       ATHENAFS_PAGE_URL: "${ATHENAFS_PAGE_URL:-}"   # address of this page as seen from the network (set by scripts/up.sh)
       DISTRIBYTED_ARCHIVES: "${ATHENAFS_ARCHIVES:-off}"   # "on": zip/7z/rar open as folders (expensive to browse)
     ports: ["${ATHENAFS_BIND:-127.0.0.1}:${ATHENAFS_PORT:-8080}:8080"]
@@ -41,6 +46,7 @@ services:
     depends_on: [core]
     ports: ["${SMB_BIND:-127.0.0.1}:${SMB_PORT:-445}:445"]
     environment:
+      SMB_SHARE: "${SMB_SHARE:-torrents}"
       SMB_USER: "${SMB_USER:-tor}"
       SMB_PASS: "${SMB_PASS:-rent}"
     volumes:

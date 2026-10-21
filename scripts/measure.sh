@@ -5,6 +5,7 @@
 #   sh scripts/measure.sh ["note"]
 set -eu
 cd "$(dirname "$0")/.."
+if [ -f .env ]; then set -a; . ./.env; set +a; fi
 note=${1:-}
 head=$(git rev-parse --short HEAD)
 [ -z "$(git status --porcelain -- . ':!docs/measurements.md')" ] || { echo "uncommitted changes: commit first" >&2; exit 1; }
