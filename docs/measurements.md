@@ -21,3 +21,4 @@ Corrections (rows are not rewritten):
 | 2026-10-21T13:59Z | 30f91c1 | 642 / 636 / 12479029 / 442784 / 258.3 TB | 2 | 10 | 345 | 108 | 5.5 | 0.8 | 0.00 | 0.00 | 0.00 | 0.01 | supervisor: piece table, background status. NOT VALID: the end of loading was detected too early (30 s without an addition; 345/636 mounted), so CPU and RSS were taken while loading |
 | 2026-10-21T14:14Z | a1a779a | 642 / 636 / 12479029 / 442784 / 258.3 TB | 1 | 210 | 636 | 85 | 13.8 | 0.9 | 0.00 | 0.00 | 0.00 | 0.01 | supervisor: piece table, background status (same service code as 30f91c1) |
 | 2026-10-21T14:38Z | e9c3b55 | 642 / 636 / 12479029 / 442784 / 258.3 TB | 1 | 10 | 636 | 9 | 1.0 | 0.8 | 0.00 | 0.00 | 0.00 | 0.01 | dormant torrents (idle 600 s) |
+| 2026-10-21T16:43Z | 1d2ff37 | 642 / 636 / 12479029 / 442784 / 258.3 TB | 0 | 8 | 636 | 9 | 1.1 | 1.0 | 0.00 | 0.00 | 0.00 | 0.01 | health check (2 at a time, 60 s; probes running during the rest sample) |
