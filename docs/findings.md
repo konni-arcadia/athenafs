@@ -204,6 +204,7 @@ pieces, 443,000 files, 258 TB).
   wakes it (37 peers, a 20-60 MB file in 15 s including the wake); it went back to sleep 80 s after the read with a 60 s
   delay; read again afterwards it came from the cache (3 kB received). The storage `Close` of a dropped torrent is a no-op,
   the cache is shared. Dormant torrents do not seed. Magnets still without metadata stay in the client until it arrives.
+  The share was checked from a Mac with this patch (browsing and copying: fine).
 - **Incident:** Docker's default 10 s stop timeout killed Distribyted mid-stop and left a dead FUSE mount (the share was
   down). `stop_grace_period: 60s`, stale FUSE mounts cleared by the supervisor and `up.sh`.
 
