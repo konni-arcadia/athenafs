@@ -28,3 +28,9 @@ Torrents as a read-only network folder (patched Distribyted + supervisor/web pag
 Mount lists the folders; `curl localhost:8080/api` shows `"state": "running"`; add and remove a small torrent from the page;
 read a file twice (the second read must receive about nothing); erase it and read again (it must download again); mount the
 share from another machine and copy a file, comparing a checksum.
+
+## Measurements
+Performance work is measured, and every measurement is bound to a commit: commit the change, `sh scripts/up.sh` (it
+records the commit in the container), then `sh scripts/measure.sh "note"` (it refuses a dirty tree or a container built
+from another commit) and commit the new row of `docs/measurements.md` on its own. The dataset is in each row: torrents keep
+being added, so compare like with like.
