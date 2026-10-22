@@ -439,5 +439,24 @@ Open points (2026-10-22):
     sub-folder anywhere with exactly the hidden folder's name is hidden too.
   - Later, only if needed: an archive view as a separate SMB share with its own account. The share name itself is already
     a setting (`SMB_SHARE`).
+- **Page, folder rows (agreed 2026-10-22, not started):** one compact row per folder (name, torrents, size, status, and
+  badges only when relevant: hidden, ready view, waiting for metadata, no peer) and one "Manage" button opening a panel in
+  three blocks: "In the share" (normal view shown/hidden, ready view and its name and links, one sentence on the local
+  library mode), "Folder" (rename, browse, the list of torrents), and a "Danger zone" framed apart (erase its cache,
+  remove, remove keeping the data). Rename moves into the panel (owner's choice). Long explanations once in the panel,
+  not as tooltips on every button. To do after the ~1000-torrent import is measured.
+- **"Gentleman" mode (owner's idea, 2026-10-22, rules to discuss):** set aside part of the cache to help torrents that are
+  in difficulty, by keeping their pieces and seeding them. Questions to settle before anything is built:
+  - **How much:** a share of the cache cap or a fixed size, and whether that part escapes the normal eviction (it needs a
+    form of protection from eviction, which ordinary files do not have: pinning is not wanted for them yet).
+  - **Which torrents:** the health check already records peers known, connected and seeders. Candidates would be
+    torrents with peers asking (leechers) but few or no seeders; a torrent with no peer at all has nobody to seed to.
+    Rarest pieces first, or whole torrents? Folder by folder, or across the share?
+  - **How long, and rotation:** keep a torrent until it has enough seeders again, then free its room for another.
+  - **Cost:** a seeding torrent stays awake (memory and CPU per awake torrent, measured in `docs/measurements.md`), and
+    takes upload bandwidth: an upload cap and maybe time windows would be needed (upload is not capped today).
+  - **Exposure:** seeding shows this IP to more peers for longer; what is seeded is the user's responsibility (README,
+    Security). Off by default.
+  - **Measure:** upload sent, peers served, how many torrents went back above a seeder threshold.
 - **Not wanted yet:** pinning files in the cache (protecting them from eviction).
 - **Patches upstream:** the patches are local; the crash and prefix fixes would be worth proposing to Distribyted.
