@@ -1277,7 +1277,8 @@ def render(s=None):
                     f"<td class=\"n small\">{mb(j['read'])} / {mb(j['size'])}<br><span class=mut>{how} · {round(time.time() - j['since'])} s</span></td></tr>")
         act += "</table></div>"
     if pf["failed"]:
-        act += "".join(f"<div class=\"mut small\">could not cache {html.escape(f['path'])}: {html.escape(f['error'])}</div>" for f in pf["failed"][-3:])
+        act += "".join(f"<div class=\"mut small\">could not cache {html.escape(f['path'])} "
+                       f"({time.strftime('%H:%M', time.localtime(f.get('at', 0)))}): {html.escape(f['error'])}</div>" for f in pf["failed"][-3:])
     if a["files"]:
         act += (f"<div class=\"mut small\" style=\"margin-top:10px\">Files that received data in the last {WINDOW} s "
                 "(counted per completed piece):</div><div class=wrap><table>")
@@ -2009,6 +2010,11 @@ def prefetch_worker():
         if path.startswith("/") or ".." in path.split("/"):   # a torrent can name its files anything: stay in the mount
             err, job["cancel"] = "refused: path leaves the share", True
         for attempt in range(0 if job["cancel"] else 3):   # a read can time out (no peer yet) or fail during a restart
+            # a restart is not a failure: wait (up to 5 minutes) until the service runs and the mount answers again
+            for _ in range(150):
+                if job["cancel"] or (state["state"] == "running" and os.path.isdir(os.path.join(MOUNT, path.split("/", 1)[0]))):
+                    break
+                time.sleep(2)
             try:
                 with open(os.path.join(MOUNT, path), "rb", buffering=0) as f:
                     f.seek(job["read"])
@@ -2020,14 +2026,19 @@ def prefetch_worker():
                 ok = not job["cancel"]
                 break
             except OSError as e:
-                err = str(e); time.sleep(5)
+                if e.errno == 5 and state["state"] == "running":   # Distribyted's answer to a read that got no data in time
+                    err = (f"no data from peers within the read timeout ({os.environ.get('ATHENAFS_READ_TIMEOUT') or 60} s): "
+                           f"the torrent seems to have no reachable seeder ({health_text(job['hash'])})")
+                else:
+                    err = str(e)
+                time.sleep(5)
         with plock:
             prefetch["active"].pop(path, None)
             prefetch["bytes"] += job["read"]
             if ok:
                 prefetch["done"] += 1
             elif not job["cancel"] or err:
-                prefetch["failed"] = (prefetch["failed"] + [{"path": path, "error": err}])[-20:]
+                prefetch["failed"] = (prefetch["failed"] + [{"path": path, "error": err, "at": time.time()}])[-20:]
 
 
 def prefetch_view():
