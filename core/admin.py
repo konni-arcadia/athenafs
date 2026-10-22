@@ -882,6 +882,16 @@ input[type=text],input[type=number],input[type=search],textarea{{font:inherit;pa
 .add{{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:6px 0}}.add .l{{flex:1 1 380px}}.add .f{{flex:0 1 180px}}
 .bar{{height:4px;background:var(--chip);border-radius:2px;margin-top:4px;overflow:hidden}}.bar i{{display:block;height:100%;background:var(--acc)}}
 .sub td{{padding:4px 6px 4px 22px;font-size:14px}}
+.folders details.folder{{border-bottom:1px solid var(--line)}}.folders details.folder:last-child{{border-bottom:0}}
+summary.frow{{display:flex;align-items:center;gap:10px;padding:10px 4px;cursor:pointer;list-style:none;flex-wrap:wrap}}
+summary.frow::-webkit-details-marker{{display:none}}.fname{{font-weight:600}}.badges{{display:flex;gap:6px;flex-wrap:wrap;flex:1}}
+.badges .pill{{font-size:12px}}.pill.ok{{color:var(--ok)}}.pill.warn{{color:var(--warn)}}.fnum{{white-space:nowrap;font-variant-numeric:tabular-nums}}
+.manage{{font-size:13px;border:1px solid var(--line);border-radius:7px;padding:3px 9px}}.manage:after{{content:" \\25BE"}}
+details.folder[open] .manage:after{{content:" \\25B4"}}details.folder[open]>summary{{background:var(--chip);border-radius:8px}}
+.panel{{display:grid;gap:10px;padding:10px 4px 14px}}.blk{{border:1px solid var(--line);border-radius:8px;padding:10px 12px}}
+.blk h3{{margin:0 0 6px;font-size:13px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut)}}
+.blk .line{{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:4px 0}}.blk p{{margin:6px 0 0}}
+.danger-zone{{border-color:var(--warn)}}.danger-zone h3{{color:var(--warn)}}
 .tile.pie{{display:flex;justify-content:space-between;align-items:center;gap:8px}}.tile.pie b{{font-size:20px}}
 .donut{{width:64px;height:64px;border-radius:50%;flex:none;position:relative}}
 .donut:after{{content:"";position:absolute;inset:14px;border-radius:50%;background:var(--card)}}
@@ -922,10 +932,7 @@ border-left:3px solid var(--warn);border-radius:8px;padding:10px 14px;box-shadow
 <div class=tile><span>Torrents</span><b>{ntor}</b><span>in {nfold} folders · {nawake} awake</span></div>
 </div>
 <section class=card><h2>Activity</h2>{act}</section>
-<section class=card><h2>Folders</h2><div class=wrap><table>
-<tr><th>Folder</th><th>Torrents</th><th class=n>Size</th><th>Status</th></tr>
-{sources}
-</table></div></section>
+<section class=card><h2>Folders</h2><div class=folders>{sources}</div></section>
 <section class=card><details data-k=cache-section><summary><b>Cache</b> <span class="mut small">{ncached} torrent(s) with cached
 data, {cache} · per torrent and file, with Erase</span></summary><div class=wrap style="margin-top:10px"><table>
 <tr><th>Torrent</th><th class=n>Size</th><th class=n>Cached</th><th></th></tr>
@@ -1103,44 +1110,82 @@ def histogram_svg():
             f"<i style=\"background:var(--acc)\"></i>download<i style=\"background:var(--warn)\"></i>upload</div>")
 
 
-def folder_settings_cell(route, dis, st, lists):
-    """Folder row: visibility in the share, and its ready view (complete files, archives opened, in a sibling folder)."""
+def folder_block(route, xs, dis, st, lists, inner, more):
+    """One folder: a summary line (name, badges only when there is something to say, torrents, size) that opens a
+    Manage panel in three blocks: in the share, the folder itself, and a danger zone."""
     r = html.escape(route, quote=True)
     field = f"<input type=hidden name=folder value=\"{r}\">"
     v = st.get(route, {})
+    n = len(xs)
+    counts = {}
+    for x in xs:
+        counts[x["status"]] = counts.get(x["status"], 0) + 1
+    awake = sum(1 for x in xs if x.get("awake"))
+    dead = sum(1 for x in xs if looks_dead(x["hash"]))
+    checked = sum(1 for x in xs if x["hash"] in health)
+    files = lists.get(route, [])
+    badges = []
     if v.get("hidden"):
-        vis = (f"<span class=mut>Normal view:</span> <b>hidden from the share</b> <form method=post action=/folder-visibility>{field}"
-               f"<input type=hidden name=hidden value=0><button {dis}>Show in the share</button></form>")
+        badges.append(("warn", "hidden from the share"))
+    if v.get("view"):
+        badges.append(("ok", f"ready view · {len(files)} file(s)"))
+    for st_, c in counts.items():
+        if not st_.startswith("mounted"):
+            badges.append(("busy", f"{c} {st_}"))
+    if awake:
+        badges.append(("", f"{awake} awake"))
+    if dead:
+        badges.append(("warn", f"{dead} with no peer found"))
+    bh = "".join(f"<span class=\"pill {c}\">{html.escape(t)}</span>" for c, t in badges)
+    summary = (f"<summary class=frow><span class=fname>{html.escape(route)}</span><span class=badges>{bh}</span>"
+               f"<span class=\"fnum mut\">{n} torrent{'s' if n != 1 else ''}</span><span class=fnum>{mb(sum(x['size'] for x in xs))}</span>"
+               f"<span class=manage>Manage</span></summary>")
+
+    # In the share
+    if v.get("hidden"):
+        vis = (f"<div class=line><span>Normal view: <b>hidden</b></span> <form method=post action=/folder-visibility>{field}"
+               f"<input type=hidden name=hidden value=0><button {dis}>Show in the share</button></form></div>")
     else:
-        vis = (f"<span class=mut>Normal view: shown</span> <form method=post action=/folder-visibility>{field}"
-               f"<input type=hidden name=hidden value=1><button {dis} title=\"Hide this folder from SMB clients (a few seconds, no "
-               f"restart). It stays in the catalogue: search, Cache and its ready view keep working. With the ready view on, the share "
-               f"then shows only what is ready.\">Hide from the share</button></form>")
+        vis = (f"<div class=line><span>Normal view: shown</span> <form method=post action=/folder-visibility>{field}"
+               f"<input type=hidden name=hidden value=1><button {dis}>Hide from the share</button></form></div>")
     if not v.get("view"):
-        ready = (f"<span class=mut>Ready view: off</span> <form method=post action=/ready-view>{field}<input type=hidden name=on value=1>"
-                 f"<button {dis} title=\"A sibling folder showing the files of this folder that are completely in the cache, archives "
-                 f"(zip, 7z, rar) opened as folders: browsing it never downloads anything. Restarts the service.\">Turn on ready view"
-                 f"</button></form>")
+        ready = (f"<div class=line><span>Ready view: off</span> <form method=post action=/ready-view>{field}<input type=hidden name=on value=1>"
+                 f"<button {dis}>Turn on</button></form></div>")
     else:
-        name = v["view"]; loc = locations(name, True); files = lists.get(route, [])
+        name = v["view"]; loc = locations(name, True)
         arch = sum(1 for f in files if f.lower().endswith(ARCHIVE_EXT))
-        ready = (f"<span class=mut>Ready view:</span> <b>{html.escape(name)}</b> "
-                 f"<span class=mut>· {len(files)} complete file(s), {arch} archive(s) · <a href=\"{html.escape(loc['smb_url'] or '')}\">open</a> · "
-                 f"<a href=# data-copy=\"{html.escape(loc['unc_path'] or '', quote=True)}\">copy \\\\ path</a></span> "
+        ready = (f"<div class=line><span>Ready view: <b>{html.escape(name)}</b> <span class=mut>· {len(files)} complete file(s), "
+                 f"{arch} archive(s) · <a href=\"{html.escape(loc['smb_url'] or '')}\">open</a> · "
+                 f"<a href=# data-copy=\"{html.escape(loc['unc_path'] or '', quote=True)}\">copy \\\\ path</a></span></span> "
                  f"<form method=post action=/ready-view class=ask data-field=name data-current=\"{html.escape(name, quote=True)}\" "
-                 f"title=\"New name for the ready view (it must not be the name of a folder or of another view):\">{field}"
+                 f"title=\"New name for the ready view (not the name of a folder or of another view):\">{field}"
                  f"<input type=hidden name=on value=1><button type=button class=askopen {dis}>Rename view</button></form> "
                  f"<form method=post action=/ready-view>{field}<input type=hidden name=on value=0>"
-                 f"<button class=danger {dis} data-confirm=\"Turn off the ready view {html.escape(name, quote=True)}? (restarts the service; the cache is kept)\">Turn off</button></form>")
-    n = sum(1 for x in load_sources() if x["route"] == route)
-    acts = (f"<span class=mut>Whole folder:</span> "
-            f"<form method=post action=/folder-erase>{field}<button class=danger {dis} data-confirm=\"Erase the cached data of all "
-            f"{n} torrent(s) of {r}? They stay in the share. (restarts the service)\">Erase its cache</button></form> "
-            f"<form method=post action=/folder-remove>{field}<input type=hidden name=erase value=1><button class=danger {dis} "
-            f"data-confirm=\"Remove the folder {r}: its {n} torrent(s) and their cached data? (restarts the service)\">Remove folder</button></form> "
-            f"<form method=post action=/folder-remove>{field}<input type=hidden name=erase value=0><button {dis} "
-            f"data-confirm=\"Remove the folder {r} ({n} torrent(s)) and keep their cached data? (restarts the service)\">Remove, keep data</button></form>")
-    return f"<div>{vis}</div><div style=\"margin-top:4px\">{ready}</div><div style=\"margin-top:4px\">{acts}</div>"
+                 f"<button {dis} data-confirm=\"Turn off the ready view {html.escape(name, quote=True)}? (restarts the service; the cache is kept)\">Turn off</button></form></div>")
+    share = (f"<div class=blk><h3>In the share</h3>{vis}{ready}"
+             f"<p class=\"mut small\">The <b>ready view</b> is a sibling folder showing the files of this folder that are completely in "
+             f"the cache, archives (zip, 7z, rar) opened as folders: browsing it never downloads anything (turning it on or off "
+             f"restarts the service). <b>Hiding</b> the folder removes it from the share within seconds, without a restart; it "
+             f"stays in the catalogue, so search and Cache keep working. Both together: the share shows only what is ready.</p></div>")
+
+    # The folder itself
+    folder = (f"<div class=blk><h3>Folder</h3><div class=line>"
+              f"{ask_form('route', route, dis, 'Rename', 'New name for this folder (an existing folder name merges the two; later torrents of the old name follow):', route)} "
+              f"<a href=# class=browse data-f=\"{r}\">Browse in the search</a> "
+              f"<span class=\"mut small\">health: {checked}/{n} checked</span></div>"
+              f"<details data-k=\"src/{r}\"><summary class=\"mut small\">{n} torrent{'s' if n != 1 else ''}</summary>"
+              f"<div class=wrap><table>{inner}</table></div>{more}</details></div>")
+
+    # Danger zone
+    danger = (f"<div class=\"blk danger-zone\"><h3>Danger zone</h3><div class=line>"
+              f"<form method=post action=/folder-erase>{field}<button class=danger {dis} data-confirm=\"Erase the cached data of all "
+              f"{n} torrent(s) of {r}? They stay in the share. (restarts the service)\">Erase its cache</button></form> "
+              f"<form method=post action=/folder-remove>{field}<input type=hidden name=erase value=1><button class=danger {dis} "
+              f"data-confirm=\"Remove the folder {r}: its {n} torrent(s) and their cached data? (restarts the service)\">Remove folder</button></form> "
+              f"<form method=post action=/folder-remove>{field}<input type=hidden name=erase value=0><button {dis} "
+              f"data-confirm=\"Remove the folder {r} ({n} torrent(s)) and keep their cached data? (restarts the service)\">Remove, keep data</button></form>"
+              f"</div><p class=\"mut small\">Each one restarts the service once for the whole folder.</p></div>")
+    return f"<details class=folder data-k=\"folder/{r}\">{summary}<div class=panel>{share}{folder}{danger}</div></details>"
 
 
 def ask_form(field, value, dis, label, question, current):
@@ -1185,8 +1230,6 @@ def render(s=None):
         status += f" · {awake} awake" if len(xs) > 1 else (" · awake" if awake else " · dormant")
         status += (f" · health: {checked}/{len(xs)} checked, {dead} with no peer found" if len(xs) > 1
                    else f" · {health_text(xs[0]['hash'])}")
-        names = sorted({x["name"] or (x["hash"] or "")[:12] for x in xs})
-        label = html.escape(names[0]) + (f" <span class=mut>+{len(xs) - 1}</span>" if len(xs) > 1 else "")
         inner = ""
         for x in xs[:200]:
             inner += (f"<tr class=sub><td>{html.escape(x['name'] or (x['hash'] or '')[:12])} <span class=\"mut small\">{x['kind']} · {(x['hash'] or '')[:8]} · {health_text(x['hash'])}</span></td>"
@@ -1195,15 +1238,11 @@ def render(s=None):
                       f"<form method=post action=/remove><input type=hidden name=id value={x['id']}>"
                       f"<button class=danger {dis} name=erase value=1 data-confirm=\"Remove this torrent and erase its local data?\">Remove</button> "
                       f"<button {dis} name=erase value=0 data-confirm=\"Remove this torrent and keep its local data?\">Remove, keep data</button></form></td></tr>")
-        srows += (f"<tr><td><b>{html.escape(route)}</b> <a href=# class=browse data-f=\"{html.escape(route, quote=True)}\">browse</a> {ask_form('route', route, dis, 'Rename', 'New name for this folder (an existing folder name merges the two; later torrents of the old name follow):', route)}</td><td>{label}</td><td class=n>{mb(sum(x['size'] for x in xs))}</td>"
-                  f"<td>{html.escape(status)}</td></tr>"
-                  f"<tr><td colspan=4 style=\"padding-top:0\" class=small>{folder_settings_cell(route, dis, av_settings, av_lists)}</td></tr>"
-                  f"<tr><td colspan=4 style=\"padding-top:0\"><details data-k=\"src/{html.escape(route, quote=True)}\"><summary class=\"mut small\">"
-                  f"{len(xs)} torrent{'s' if len(xs) > 1 else ''}</summary><table>{inner}</table>"
-                  + (f"<div class=\"mut small\">… and {len(xs) - 200} more (the full list is in <a href=/api>/api</a>)</div>" if len(xs) > 200 else "")
-                  + "</details></td></tr>")
+        more = (f"<div class=\"mut small\">… and {len(xs) - 200} more (the full list is in <a href=/api/torrents>/api/torrents</a>)</div>"
+                if len(xs) > 200 else "")
+        srows += folder_block(route, xs, dis, av_settings, av_lists, inner + "", more)
     if not srows:
-        srows = "<tr><td colspan=4 class=mut>No torrent yet: add one above.</td></tr>"
+        srows = "<div class=mut>No torrent yet: add one above.</div>"
     msg = f"<div class=msg>{html.escape(s['message'])}</div>" if s["message"] else ""
     secwarn = ""
     if WARNINGS:   # a badge in the header that unfolds, not a banner on every page
