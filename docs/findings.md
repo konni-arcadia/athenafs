@@ -371,3 +371,42 @@ case over SMB (copy first, then extract locally), a real torrent with sub-folder
   tooling on the host (`cp -r archive.zip/. dest/`).
 - Trap found during the tests: a `docker compose up` run without the data directory variable made Docker create empty
   directories at the host root; the compose file now has a default for `DATA`.
+
+Open points (2026-10-22):
+- **Release, stage 1:** done: base images pinned by digest, Distribyted by commit, `CHANGELOG.md`. Left: tag `v0.1.0` and
+  a GitHub release. The `apk` and `apt` packages installed during the build are not pinned. Stage 2
+  (images built by CI and published to a registry) only if other people install it; a public image needs its source
+  offered (GPL), which a private repository does not do.
+- **WebDAV mode (idea):** Distribyted has a WebDAV server; serving through it instead of FUSE + Samba would remove
+  `/dev/fuse`, `SYS_ADMIN` and AppArmor unconfined. To try first: Finder over WebDAV on the full set. The prefetch reader
+  reads through the FUSE mount and would need another path. Windows' WebDAV client is weak (50 MB file limit by default).
+- **AppArmor:** a profile allowing only the FUSE mount instead of `unconfined` (needs loading on the host).
+- **Not tested:** Windows (SMB and the `\\host\share` locations), Finder and Explorer previews (a preview that reads a
+  file wakes its torrent).
+- **Watch:** CPU at rest measured 9 to 19 % across the last rows with the same code paths (health probes running); if it
+  keeps rising, look at it.
+- **Browsing archives over SMB (idea, agreed with the owner 2026-10-22, not started):** show the content of zip, 7z and rar
+  archives only for archives that are **100 % in the cache**, so that no client (Finder previews, Explorer thumbnails,
+  `find`, backups) can trigger a download by enumerating them. Opening a partly cached archive would cost at least one
+  piece (16 to 64 MB on the large collections) and wake its torrent; a folder of 700 zips walked by a client would be about
+  11 GB.
+  - **Per folder, set on the page** (Folders section): normal view on/off, archive view on/off, name of the archive view
+    (default `<folder>_ZIP` or similar, editable, sanitised, refused if it collides). The archive view is a sibling folder
+    at the root of the share, same tree, complete archives only, each opened as a folder. Applying a change restarts the
+    core, like a rename.
+  - **"Local library" mode:** normal view off, archive view on: the share shows only what is ready (for a player or another
+    device), while the page and the API keep the whole catalogue to choose and cache from.
+  - In the normal view an archive stays an ordinary file: nothing ever changes type (Finder and Explorer handle it badly).
+  - Renaming a folder renames its archive view too, unless that name was customised (confirmed by the owner).
+  - The supervisor already knows which files are complete (the "cached" state) and would write the list per folder for
+    Distribyted, which already opens archives and would get a patch for the views and the filter. An archive evicted from
+    the cache leaves its view at the next refresh; a read in progress just downloads what is missing (the rule decides what
+    is listed, not what may be read). Solid 7z/rar are fine since they are local; reading a large compressed member stays
+    slow (deflate from the member's start).
+  - Not wanted for now: feeding the files inside archives to the search (the owner is not convinced).
+  - Workflow: search on the page, "Cache", then browse the archive view over SMB.
+  - Before building it: measure Finder on an archive view with a few hundred complete archives.
+  - Later, only if needed: an archive view as a separate SMB share with its own account. The share name itself is already
+    a setting (`SMB_SHARE`).
+- **Not wanted yet:** pinning files in the cache (protecting them from eviction).
+- **Patches upstream:** the patches are local; the crash and prefix fixes would be worth proposing to Distribyted.

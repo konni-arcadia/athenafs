@@ -1,0 +1,52 @@
+# Changelog
+
+Notable changes, newest first. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
+[Semantic Versioning](https://semver.org/) once the first one is tagged. Each entry names the commits; measurements per
+commit are in `docs/measurements.md`, the reasons and tests behind each change in `docs/findings.md`.
+
+**Upgrading:** read the "Settings" and "Changed" lines of every version between yours and the new one, compare your `.env`
+with `.env.example`, then `sh scripts/up.sh` (it rebuilds).
+
+## [Unreleased]
+
+### Added
+- Reproducible builds: base images pinned by digest (`golang:1.24-alpine`, `alpine:3`, `debian:trixie-slim`) and
+  Distribyted fetched by commit (`58d471c`, tag v0.15.0) instead of by tag. Alpine and Debian packages installed during the
+  build (`apk`, `apt`) are not pinned. Go modules are pinned by Distribyted's `go.sum`.
+- Security (7213a7a): both containers drop every capability and set `no-new-privileges`; the core keeps `SYS_ADMIN` and
+  `DAC_OVERRIDE`, Samba keeps `CHOWN`, `SETUID`, `SETGID`. `up.sh` needs `sudo` only where `/` is not a shared mount.
+  Warnings (in `up.sh`, on the page, in `/api/status`) when the page is exposed without a password or the share with the
+  test account. Torrent paths that leave the share (`..`) are never read. README: Security section.
+- Licence GPL-3.0-or-later (c57a3e3).
+- Every setting through `.env` (d403e53): `ATHENAFS_PASSWORD`, `ATHENAFS_SMB_HOST`, `SMB_SHARE`, `ATHENAFS_ADD_TIMEOUT`,
+  `ATHENAFS_READ_TIMEOUT` (they were read nowhere, or only from files).
+- API (30ee655): `/api/status`, `/api/torrents`, `/api/torrents/{hash}`, `/api/file`, `/api/usage` (largest in the cache
+  by file, folder or torrent), `POST /api/erase` (a file, folder or torrent of the share), `smb_url` and `unc_path` on every
+  item, documentation at `/api/docs` and `/api/openapi.json`; `X-Athenafs: 1` for scripts. Page: "Largest in the cache".
+- Health check (c9145b6): dormant torrents woken in turn to count their peers; shown per torrent and in the search,
+  warning before caching files of a torrent where no peer was found.
+- Dormant torrents (e9c3b55): a torrent enters the BitTorrent client only while one of its files is open (plus
+  `ATHENAFS_DORMANT_AFTER`, 600 s). With 636 torrents: core memory 13.8 GB to 1.0 GB, CPU at rest 85 % to 9 %.
+- Measurements bound to commits (99f3c5a): `scripts/measure.sh`, `docs/measurements.md`.
+- Page and features (2ac7150): new layout, activity (rates, files receiving data), search over every file name with its
+  cache state, "Cache" (read files into the cache ahead of time), rename a folder or move a torrent, links to the page at
+  the root of the share; start-up with hundreds of torrents (parallel, in the background, late magnets).
+- Batch add of magnet links, merged folders for torrents with the same name, crash watchdog (3bf3a1c).
+
+### Changed
+- Supervisor rework (30f91c1): piece hashes in a table on disk, status computed in the background; supervisor memory
+  13.9 GB to 0.9 GB, page and API from no answer within 120 s to immediate.
+- Confirmations and name entry happen in the page (1d2ff37, 74e2f59): `confirm()` and `prompt()` pop-ups were blocked
+  silently in embedded browsers.
+- Sizes in TB above 1,000 GB (490d050).
+- The core container stops with a 60 s grace period (30f91c1).
+- Settings: `ATHENAFS_DORMANT_AFTER`, `ATHENAFS_HEALTH_PROBE`, `ATHENAFS_HEALTH_PARALLEL` added; `add_timeout` 45 s to 10 s.
+
+### Fixed
+- Distribyted crashed at start-up with many torrents (`concurrent map read and map write`) and served a folder from
+  another one whose name it merely started with (3bf3a1c).
+- A killed Distribyted left a dead FUSE mount and the share down; stale mounts are now cleared (30f91c1).
+- Start-up failure introduced and fixed on 2026-10-21 (1d32791).
+
+## Initial commit (185fcfc, 2026-10-21)
+Patched Distribyted with a status and erase page, Samba share, cache cap, `up.sh` and `down.sh`.

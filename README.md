@@ -157,6 +157,7 @@ scripts/measure-upload.sh traffic under upload caps (tc), used for the early tes
 experiments/btfs/         the rejected first candidate, kept for the record
 docs/findings.md          what was measured and why things are the way they are
 docs/measurements.md      one row of measurements per commit
+CHANGELOG.md              notable changes, and what to check when upgrading
 data/                     runtime data, not in git: torrents/ (optional .torrent files), state/, mount/
 ```
 

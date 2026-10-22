@@ -1,7 +1,12 @@
 # Distribyted v0.15.0 + a web supervisor (admin.py): status page and per-torrent/file/folder erasing of local data.
-FROM golang:1.24-alpine AS builder
+# Everything the build downloads is pinned (base images by digest, Distribyted by commit), so a given commit of athenafs
+# always builds the same thing. To update: change the digest or commit here, rebuild, test, measure.
+FROM golang:1.24-alpine@sha256:8bee1901f1e530bfb4a7850aa7a479d17ae3a18beb6e09064ed54cfd245b7191 AS builder
 RUN apk add --no-cache git fuse-dev gcc libc-dev g++ make
-RUN git clone --depth 1 --branch v0.15.0 https://github.com/distribyted/distribyted.git /src
+# Distribyted v0.15.0 = commit 58d471c31f392ba4b8cd5b394bdd172c6206adb6 (a tag can be moved, a commit cannot)
+RUN git init -q /src && cd /src \
+ && git fetch -q --depth 1 https://github.com/distribyted/distribyted.git 58d471c31f392ba4b8cd5b394bdd172c6206adb6 \
+ && git checkout -q FETCH_HEAD && test "$(git rev-parse HEAD)" = 58d471c31f392ba4b8cd5b394bdd172c6206adb6
 WORKDIR /src
 # Modules first, in their own layer: changing a patch below then rebuilds without downloading them again.
 RUN go mod download
@@ -68,7 +73,7 @@ RUN sed -i 's|// Add to stats|dumpMetainfo(t) // Add to stats|' torrent/service.
  && test "$(grep -c 'dumpMetainfo(t)' torrent/service.go)" = 1
 RUN BIN_OUTPUT=/bin/distribyted make build
 
-FROM alpine:3
+FROM alpine:3@sha256:71e9b7bae160ba167fa17414401b94cbcdaf3c32feeab9298bd794a2a0614c35
 RUN apk add --no-cache gcc libc-dev fuse-dev python3 \
  && echo "user_allow_other" > /etc/fuse.conf
 COPY --from=builder /bin/distribyted /bin/distribyted
