@@ -468,18 +468,27 @@ Open points (2026-10-22):
   library mode), "Folder" (rename, browse, the list of torrents), and a "Danger zone" framed apart (erase its cache,
   remove, remove keeping the data). Rename moves into the panel (owner's choice). Long explanations once in the panel,
   not as tooltips on every button. To do after the ~1000-torrent import is measured.
-- **"Gentleman" mode (owner's idea, 2026-10-22, rules to discuss):** set aside part of the cache to help torrents that are
-  in difficulty, by keeping their pieces and seeding them. Questions to settle before anything is built:
-  - **How much:** a share of the cache cap or a fixed size, and whether that part escapes the normal eviction (it needs a
-    form of protection from eviction, which ordinary files do not have: pinning is not wanted for them yet).
-  - **Which torrents:** the health check already records peers known, connected and seeders. Candidates would be
-    torrents with peers asking (leechers) but few or no seeders; a torrent with no peer at all has nobody to seed to.
-    Rarest pieces first, or whole torrents? Folder by folder, or across the share?
-  - **How long, and rotation:** keep a torrent until it has enough seeders again, then free its room for another.
-  - **Cost:** a seeding torrent stays awake (memory and CPU per awake torrent, measured in `docs/measurements.md`), and
-    takes upload bandwidth: an upload cap and maybe time windows would be needed (upload is not capped today).
-  - **Exposure:** seeding shows this IP to more peers for longer; what is seeded is the user's responsibility (README,
-    Security). Off by default.
-  - **Measure:** upload sent, peers served, how many torrents went back above a seeder threshold.
+- **Gentleman mode (built 2026-10-22; owner's choices: rarest pieces directly, on by default, settings on the page):**
+  - **Swarm data:** the supervisor scrapes the trackers itself (BEP 15 UDP, 70 info-hashes per request, and HTTP scrape)
+    every 6 h, up to 6 trackers per torrent, keeping the best answer. First run: 58 s, 4 of 38 trackers answered, covering
+    636 of 1036 torrents: 14 with no seeder (all with leechers waiting), 13 with 1, 22 with 2, 41 with 3-4, 546 with 5 or
+    more; 35 "in difficulty" (1-2 seeders, leechers waiting), the most striking with 1 seeder and 769 leechers.
+  - **Choice:** 1 or 2 seeders and at least one leecher (0 seeders: nothing left to fetch), ranked by leechers per seeder;
+    3 slots; a torrent leaves at 3 seeders or after 24 h and waits 24 h before it can come back.
+  - **In Distribyted** (patch `gentleman`): a helped torrent must be dormant; it is woken with a cache of its own
+    (`/data/metadata/gentleman-cache`, capacity 5 % of the cache cap, a second file cache: normal use never evicts it and
+    it never evicts normal use) and held awake. One piece is asked for so that peers are contacted; every 2 minutes the
+    connected peers' bitfields are counted and the rarest pieces not held yet are asked for, within the budget. Released
+    torrents cancel their requests and sleep after the usual delay; their pieces stay in the gentleman cache until
+    evicted by others. The supervisor's own cache figures do not include that cache.
+  - **Upload cap** (patch `upload_limit`): a rate limiter on the whole client, 1 MB/s by default.
+  - **First run (2026-10-22):** the three torrents chosen were among the largest of the collection (475,087 pieces of
+    64 MB, about 30 TB; 177,754 and 99,994 pieces of 16 MB). Within 10 minutes each was connected to 30 to 50 peers
+    (none before), 115 to 463 rarest pieces were asked for each, 470 MB had arrived in the gentleman cache, nothing
+    uploaded yet. But Distribyted grew from about 3.4 to 6.0 GB: an awake torrent costs about **3.5 kB of memory per
+    piece** (2.6 GB for these 753,000 pieces), so the "20 MB per awake torrent" average of small torrents does not hold.
+  - **Memory budget** (`ATHENAFS_GENTLEMAN_MEMORY_MB`, 1000 by default, on the page): candidates are taken in order of
+    priority while their estimated cost (pieces x 3.5 kB) fits; a torrent too large for what is left is skipped. Lowering
+    the budget releases the most recent slots that no longer fit. The 3 slots stay a maximum.
 - **Not wanted yet:** pinning files in the cache (protecting them from eviction).
 - **Patches upstream:** the patches are local; the crash and prefix fixes would be worth proposing to Distribyted.

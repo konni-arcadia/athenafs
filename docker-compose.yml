@@ -28,6 +28,11 @@ services:
       ATHENAFS_PASSWORD: "${ATHENAFS_PASSWORD:-}"   # page and API password (user "admin"); empty = none
       ATHENAFS_SMB_HOST: "${ATHENAFS_SMB_HOST:-}"   # host name in the smb:// and \\host\share locations of the API
       ATHENAFS_SMB_SHARE: "${SMB_SHARE:-torrents}"
+      ATHENAFS_GENTLEMAN: "${ATHENAFS_GENTLEMAN:-on}"                 # defaults; the page's Settings override them
+      ATHENAFS_GENTLEMAN_SLOTS: "${ATHENAFS_GENTLEMAN_SLOTS:-3}"
+      ATHENAFS_GENTLEMAN_SPACE_PCT: "${ATHENAFS_GENTLEMAN_SPACE_PCT:-5}"
+      ATHENAFS_GENTLEMAN_MEMORY_MB: "${ATHENAFS_GENTLEMAN_MEMORY_MB:-1000}"
+      ATHENAFS_UPLOAD_LIMIT_KBPS: "${ATHENAFS_UPLOAD_LIMIT_KBPS:-1000}"
       ATHENAFS_EXTRA_TRACKERS: "${ATHENAFS_EXTRA_TRACKERS:-}"   # comma-separated, added to magnets that have no tracker
       ATHENAFS_ADD_TIMEOUT: "${ATHENAFS_ADD_TIMEOUT:-}"   # overrides add_timeout of core/config.yaml when set
       ATHENAFS_READ_TIMEOUT: "${ATHENAFS_READ_TIMEOUT:-}" # overrides read_timeout of core/config.yaml when set

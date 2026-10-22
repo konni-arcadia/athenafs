@@ -1,0 +1,341 @@
+diff --git a/cmd/distribyted/main.go b/cmd/distribyted/main.go
+index 79ff678..87c0344 100644
+--- a/cmd/distribyted/main.go
++++ b/cmd/distribyted/main.go
+@@ -7,6 +7,7 @@ import (
+ 	"os/signal"
+ 	"path/filepath"
+ 	"runtime"
++	"strconv"
+ 	"syscall"
+ 	"time"
+ 
+@@ -106,6 +107,16 @@ func load(configPath string, port, webDAVPort int, fuseAllowOther bool) error {
+ 
+ 	st := storage.NewResourcePieces(fc.AsResourceProvider())
+ 
++	// gentleman mode: a separate cache with its own budget ($DISTRIBYTED_GENTLEMAN_CACHE, $DISTRIBYTED_GENTLEMAN_SPACE)
++	if gdir := os.Getenv("DISTRIBYTED_GENTLEMAN_CACHE"); gdir != "" {
++		if space, err := strconv.ParseInt(os.Getenv("DISTRIBYTED_GENTLEMAN_SPACE"), 10, 64); err == nil && space > 0 {
++			if gfc, err := filecache.NewCache(gdir); err == nil {
++				gfc.SetCapacity(space)
++				torrent.GentleStorage = storage.NewResourcePieces(gfc.AsResourceProvider())
++			}
++		}
++	}
++
+ 	// cache is not working with windows
+ 	if runtime.GOOS == "windows" {
+ 		st = storage.NewFile(cf)
+diff --git a/fs/lazy.go b/fs/lazy.go
+index 72c94d1..3e0ba74 100644
+--- a/fs/lazy.go
++++ b/fs/lazy.go
+@@ -3,6 +3,7 @@ package fs
+ import (
+ 	"strings"
+ 	"sync"
++	"sync/atomic"
+ 	"time"
+ 
+ 	"github.com/anacrolix/torrent"
+@@ -20,6 +21,7 @@ type Lazy struct {
+ 	wake  func(*Lazy) (*torrent.Torrent, error)
+ 	drop  func(*Lazy, *torrent.Torrent)
+ 	mu    sync.Mutex
++	gentle atomic.Bool
+ 	t     *torrent.Torrent
+ 	open  int
+ 	since time.Time // last open or close
+@@ -135,3 +137,35 @@ func (l *Lazy) Probe(d time.Duration, sample func(*torrent.Torrent)) error {
+ 	}
+ 	return nil
+ }
++
++// Gentleman mode (see torrent/gentleman.go): while gentle is set, a wake uses the gentleman cache, and Hold keeps the
++// torrent awake until Release. gentle is atomic because the wake function reads it with l.mu held.
++
++func (l *Lazy) SetGentle(on bool) { l.gentle.Store(on) }
++func (l *Lazy) Gentle() bool       { return l.gentle.Load() }
++
++// Hold wakes the torrent if needed and keeps it awake until Release.
++func (l *Lazy) Hold() (*torrent.Torrent, error) {
++	l.mu.Lock()
++	defer l.mu.Unlock()
++	if l.t == nil {
++		t, err := l.wake(l)
++		if err != nil {
++			return nil, err
++		}
++		l.t = t
++	}
++	l.open++
++	l.since = time.Now()
++	return l.t, nil
++}
++
++// Release ends a Hold; the torrent then sleeps after the usual idle delay.
++func (l *Lazy) Release() {
++	l.mu.Lock()
++	defer l.mu.Unlock()
++	if l.open > 0 {
++		l.open--
++	}
++	l.since = time.Now()
++}
+diff --git a/torrent/gentleman.go b/torrent/gentleman.go
+new file mode 100644
+index 0000000..5ae2105
+--- /dev/null
++++ b/torrent/gentleman.go
+@@ -0,0 +1,155 @@
++package torrent
++
++import (
++	"encoding/json"
++	"os"
++	"sort"
++	"time"
++
++	"github.com/anacrolix/torrent"
++	"github.com/anacrolix/torrent/storage"
++
++	"github.com/distribyted/distribyted/fs"
++)
++
++// Gentleman mode: help torrents in difficulty (few seeders, leechers waiting) by downloading their rarest pieces into a
++// cache of their own and seeding them. The supervisor chooses the torrents and the budget and writes them to
++// $DISTRIBYTED_GENTLEMAN_FILE ({"torrents": [{"hash": ..., "budget": bytes}]}), reread every minute. GentleStorage is
++// that separate cache (set in main from $DISTRIBYTED_GENTLEMAN_CACHE and $DISTRIBYTED_GENTLEMAN_SPACE): normal use
++// never evicts it and it never evicts normal use. Only dormant torrents are taken (an awake one uses the normal cache).
++
++var GentleStorage storage.ClientImpl
++
++type gentleConf struct {
++	Torrents []struct {
++		Hash   string `json:"hash"`
++		Budget int64  `json:"budget"`
++	} `json:"torrents"`
++}
++
++type gentleJob struct {
++	l      *fs.Lazy
++	t      *torrent.Torrent
++	budget int64
++	stop   chan struct{}
++}
++
++func (s *Service) gentlemanLoop(file string) {
++	jobs := map[string]*gentleJob{}
++	for range time.Tick(time.Minute) {
++		var c gentleConf
++		if b, err := os.ReadFile(file); err == nil {
++			_ = json.Unmarshal(b, &c)
++		}
++		want := map[string]int64{}
++		for _, x := range c.Torrents {
++			want[x.Hash] = x.Budget
++		}
++		for h, j := range jobs { // released by the supervisor
++			if _, ok := want[h]; !ok {
++				close(j.stop)
++				delete(jobs, h)
++			}
++		}
++		if GentleStorage == nil {
++			continue
++		}
++		for h, budget := range want {
++			if j, ok := jobs[h]; ok {
++				j.budget = budget
++				continue
++			}
++			l := s.lazyByHash(h)
++			if l == nil || l.Awake() {
++				continue // unknown, or in use with the normal cache: try again later
++			}
++			l.SetGentle(true)
++			t, err := l.Hold()
++			if err != nil {
++				l.SetGentle(false)
++				continue
++			}
++			j := &gentleJob{l: l, t: t, budget: budget, stop: make(chan struct{})}
++			jobs[h] = j
++			s.log.Info().Str("hash", h).Int64("budget", budget).Msg("gentleman: helping this torrent")
++			go s.gentleRun(h, j)
++		}
++	}
++}
++
++func (s *Service) lazyByHash(h string) *fs.Lazy {
++	s.lazyMu.Lock()
++	defer s.lazyMu.Unlock()
++	for _, l := range s.lazies {
++		if l.Hash == h {
++			return l
++		}
++	}
++	return nil
++}
++
++// gentleRun asks for one piece so that the torrent connects to its peers, then every 2 minutes counts which connected
++// peers have which piece and asks for the rarest ones it does not have yet, until the budget is used.
++func (s *Service) gentleRun(h string, j *gentleJob) {
++	t := j.t
++	defer func() {
++		t.CancelPieces(0, t.NumPieces())
++		j.l.SetGentle(false) // the next wake (after it sleeps) uses the normal cache again
++		j.l.Release()
++		s.s.SetGentle(h, nil)
++		s.log.Info().Str("hash", h).Msg("gentleman: slot released")
++	}()
++	<-t.GotInfo()
++	n := t.NumPieces()
++	pl := t.Info().PieceLength
++	t.Piece(n / 2).SetPriority(torrent.PiecePriorityNormal) // something to want, so that peers are contacted
++	wanted := map[int]bool{n / 2: true}
++	tick := time.NewTicker(2 * time.Minute)
++	defer tick.Stop()
++	for {
++		avail := make([]int, n)
++		peers := 0
++		for _, pc := range t.PeerConns() {
++			bm := pc.PeerPieces()
++			if bm == nil {
++				continue
++			}
++			peers++
++			for i := 0; i < n; i++ {
++				if bm.Contains(uint32(i)) {
++					avail[i]++
++				}
++			}
++		}
++		complete := 0
++		for i := 0; i < n; i++ {
++			if t.Piece(i).State().Complete {
++				complete++
++			}
++		}
++		if peers > 0 && int64(len(wanted))*pl < j.budget {
++			var cand []int
++			for i := 0; i < n; i++ {
++				if avail[i] > 0 && !wanted[i] && !t.Piece(i).State().Complete {
++					cand = append(cand, i)
++				}
++			}
++			sort.SliceStable(cand, func(a, b int) bool { return avail[cand[a]] < avail[cand[b]] })
++			for _, i := range cand {
++				if int64(len(wanted)+1)*pl > j.budget {
++					break
++				}
++				t.Piece(i).SetPriority(torrent.PiecePriorityNormal)
++				wanted[i] = true
++			}
++		}
++		st := t.Stats()
++		s.s.SetGentle(h, &Gentle{Budget: j.budget, Wanted: len(wanted), Complete: complete, PieceSize: pl,
++			Peers: peers, Seeders: st.ConnectedSeeders, Uploaded: st.BytesWrittenData.Int64()})
++		select {
++		case <-j.stop:
++			return
++		case <-tick.C:
++		}
++	}
++}
+diff --git a/torrent/service.go b/torrent/service.go
+index bd3d802..d6bd0aa 100644
+--- a/torrent/service.go
++++ b/torrent/service.go
+@@ -63,6 +63,9 @@ func NewService(loaders []loader.Loader, db loader.LoaderAdder, stats *Stats, c
+ 	if dormantAfter > 0 {
+ 		go s.sleepIdle()
+ 		go s.healthChecks()
++		if f := os.Getenv("DISTRIBYTED_GENTLEMAN_FILE"); f != "" {
++			go s.gentlemanLoop(f)
++		}
+ 	}
+ 	return s
+ }
+@@ -156,7 +159,14 @@ func (s *Service) addLazyMI(r string, mi *metainfo.MetaInfo) error {
+ 	}
+ 	h := mi.HashInfoBytes().HexString()
+ 	wake := func(l *fs.Lazy) (*torrent.Torrent, error) {
+-		t, err := s.c.AddTorrent(mi)
++		ts, err := torrent.TorrentSpecFromMetaInfoErr(mi)
++		if err != nil {
++			return nil, err
++		}
++		if l.Gentle() && GentleStorage != nil { // gentleman mode: its own cache (see gentleman.go)
++			ts.Storage = GentleStorage
++		}
++		t, _, err := s.c.AddTorrentSpec(ts)
+ 		if err != nil {
+ 			return nil, err
+ 		}
+diff --git a/torrent/stats.go b/torrent/stats.go
+index 4dcbc23..26efc48 100644
+--- a/torrent/stats.go
++++ b/torrent/stats.go
+@@ -44,6 +44,19 @@ type TorrentStats struct {
+ 	Dormant bool `json:"dormant"`
+ 	// Health: result of the last health check of this torrent since Distribyted started (nil: not checked yet).
+ 	Health *Health `json:"health,omitempty"`
++	// Gentle: set while gentleman mode helps this torrent.
++	Gentle *Gentle `json:"gentleman,omitempty"`
++}
++
++// Gentle: what gentleman mode does for a torrent (rarest pieces asked for, held, upload sent).
++type Gentle struct {
++	Budget    int64 `json:"budget"`
++	Wanted    int   `json:"pieces_wanted"`
++	Complete  int   `json:"pieces_held"`
++	PieceSize int64 `json:"piece_size"`
++	Peers     int   `json:"peers"`
++	Seeders   int   `json:"seeders"`
++	Uploaded  int64 `json:"uploaded"`
+ }
+ 
+ // Health: the most peers seen while a torrent was woken for a health check (no file open, nothing downloaded).
+@@ -94,6 +107,7 @@ type Stats struct {
+ 	previousStats   map[string]*stat
+ 	dormant         map[string]map[string]*TorrentStats // route -> info-hash -> fixed stats of a dormant torrent
+ 	health          map[string]*Health                  // info-hash -> last health check
++	gentle          map[string]*Gentle                  // info-hash -> gentleman mode, while it helps
+ 
+ 	gTime time.Time
+ }
+@@ -106,6 +120,7 @@ func NewStats() *Stats {
+ 		previousStats:   make(map[string]*stat),
+ 		dormant:         make(map[string]map[string]*TorrentStats),
+ 		health:          make(map[string]*Health),
++		gentle:          make(map[string]*Gentle),
+ 	}
+ }
+ 
+@@ -170,6 +185,16 @@ func (s *Stats) SetDormant(route, hash, name string, pieces int, pieceSize int64
+ 	s.dormant[route][hash] = &TorrentStats{Name: name, Hash: hash, TotalPieces: pieces, PieceSize: pieceSize, Dormant: true}
+ }
+ 
++func (s *Stats) SetGentle(hash string, g *Gentle) {
++	s.mut.Lock()
++	defer s.mut.Unlock()
++	if g == nil {
++		delete(s.gentle, hash)
++	} else {
++		s.gentle[hash] = g
++	}
++}
++
+ func (s *Stats) SetHealth(hash string, h *Health) {
+ 	s.mut.Lock()
+ 	defer s.mut.Unlock()
+@@ -202,6 +227,7 @@ func (s *Stats) RoutesStats() []*RouteStats {
+ 		for _, t := range tl {
+ 			ts := s.stats(now, t, true)
+ 			ts.Health = s.health[ts.Hash]
++			ts.Gentle = s.gentle[ts.Hash]
+ 			tStats = append(tStats, ts)
+ 		}
+ 		for _, d := range s.dormant[r] {

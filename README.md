@@ -15,6 +15,9 @@ SMB like any other share. Built for collections of hundreds of torrents: tested 
   of torrents cost what the few being read cost.
 - **Health check:** dormant torrents are woken in turn, a few at a time, to count their peers; the page and the API show
   when a torrent looks dead.
+- **Gentleman mode (on by default):** every 6 h the trackers are asked how many seeders and leechers each torrent has.
+  A few torrents in difficulty (1 or 2 seeders, leechers waiting) get a slot: their rarest pieces are downloaded into a
+  separate part of the cache and seeded, under an upload cap, until they have 3 seeders again or for 24 h.
 - **Folders:** torrents with the same folder name share one folder (a collection split in parts appears once); a folder can
   be renamed, a torrent moved.
 - **Ready views:** for a folder you choose, a sibling folder (`<folder>_READY` by default) shows its files that are
@@ -54,6 +57,8 @@ Everything is set in `.env` (copy `.env.example`); every setting is optional.
 | `ATHENAFS_SMB_HOST` | host of the page URL | Host name in the `smb://` and `\\host\share` locations given by the API. |
 | `ATHENAFS_DORMANT_AFTER` | `600` | Seconds without an open file before a torrent leaves the client; `0` = never. |
 | `ATHENAFS_HEALTH_PROBE`, `ATHENAFS_HEALTH_PARALLEL` | `60`, `2` | Health check: seconds per torrent, torrents at a time; `0` = off. |
+| `ATHENAFS_GENTLEMAN`, `ATHENAFS_GENTLEMAN_SLOTS`, `ATHENAFS_GENTLEMAN_SPACE_PCT`, `ATHENAFS_GENTLEMAN_MEMORY_MB` | `on`, `3`, `5`, `1000` | Gentleman mode: on or off, torrents helped at most, part of the cache cap reserved for them, memory they may use (about 3.5 kB per piece of a torrent helped; larger torrents are skipped). Defaults: the page's Settings override them. |
+| `ATHENAFS_UPLOAD_LIMIT_KBPS` | `1000` | Upload cap for everything, in kB/s (`0` = none). Also in the page's Settings. |
 | `ATHENAFS_EXTRA_TRACKERS` | none | Trackers (comma-separated) added to magnets that have none; a magnet without tracker also gets the trackers its folder's other magnets use. |
 | `ATHENAFS_ADD_TIMEOUT`, `ATHENAFS_READ_TIMEOUT` | `10`, `60` | Seconds to wait for a magnet's metadata at start; for a stuck read before it fails. |
 | `ATHENAFS_ARCHIVES` | `off` | `on`: zip, 7z and rar open as folders (expensive, see The SMB share). |
@@ -144,9 +149,11 @@ Read this before exposing anything beyond the machine itself.
   torrent that would leave the share (`..`) is never read.
 
 **What is yours to decide**
-- BitTorrent shows your IP address to every peer of the torrents that are awake (being read, or woken for a health
-  check). What you add, and whether you route it through a VPN, is your responsibility.
-- Upload is not capped while a torrent is awake.
+- BitTorrent shows your IP address to every peer of the torrents that are awake (being read, woken for a health check,
+  or helped by the gentleman mode). What you add, and whether you route it through a VPN, is your responsibility.
+- The gentleman mode is on by default: right after installation, athenafs downloads pieces of the torrents you added that
+  are in difficulty and uploads them to other peers, under your IP address. Turn it off in Settings (or
+  `ATHENAFS_GENTLEMAN=off`) if you do not want to seed. Upload is capped (1 MB/s by default, `ATHENAFS_UPLOAD_LIMIT_KBPS`).
 
 ## Performance
 With 637 torrents (259 TB, 12.5 million pieces): every torrent in its folder 10 s after a start, the core at about 10 % of
@@ -174,7 +181,7 @@ data/                     runtime data, not in git: torrents/ (optional .torrent
 
 ## Known limits
 - Dormant torrents do not seed, and the first read of one waits for peers (a few seconds, up to the read timeout).
-- Upload is not capped while a torrent is awake: it takes part in the swarm like any other client.
+- The upload cap applies to the whole client; there is no download cap.
 - The first read after a restart can fail after the read timeout (60 s) while peers are found; retry.
 - Read-ahead is wide: a few times more data can be received than is read.
 - The health check counts peers announced on the DHT and trackers; a dormant torrent seldom connects to them, so "peers

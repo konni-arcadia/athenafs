@@ -19,6 +19,11 @@ with `.env.example`, then `sh scripts/up.sh` (it rebuilds).
 - Hide a folder from the share (page, or `POST /api/folder-visibility`): Samba neither lists nor opens it, within seconds
   and without a restart; it stays in the mount, so search, Cache and its ready view keep working. With its ready view on,
   the share shows only what is ready ("local library"). Settings: `/data/folder_settings.json`.
+- Gentleman mode, on by default: trackers are scraped every 6 h (seeders, leechers); up to 3 torrents with 1 or 2
+  seeders and leechers waiting get a slot, download their rarest pieces (counted from the connected peers' bitfields)
+  into a separate cache (5 % of the cache cap) and seed them, until 3 seeders or 24 h. Settings on the page; patches
+  `gentleman` and `upload_limit`; `GET /api/gentleman`.
+- Upload cap for the whole client, 1 MB/s by default (`ATHENAFS_UPLOAD_LIMIT_KBPS`, page Settings).
 - Magnets without trackers get their folder's usual trackers (and `ATHENAFS_EXTRA_TRACKERS`) when the configuration is
   generated: 409 trackerless magnets went from about 1 resolved every 2 minutes (DHT only, 25 queries a second for the
   whole client) to 93 in 3 minutes.

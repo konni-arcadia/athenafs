@@ -75,6 +75,14 @@ RUN git apply /tmp/ready_views.patch
 # its .torrent; it used to stay in the client until the next restart (343 awake after importing 409 magnets, 8.6 GB).
 COPY patches/sleep_after_metadata.patch /tmp/sleep_after_metadata.patch
 RUN git apply /tmp/sleep_after_metadata.patch
+# Local patch: upload cap for the whole client ($DISTRIBYTED_UPLOAD_LIMIT, bytes a second; set by admin.py from its settings).
+COPY patches/upload_limit.patch /tmp/upload_limit.patch
+RUN git apply /tmp/upload_limit.patch
+# Local patch: gentleman mode. Torrents in difficulty, chosen by admin.py from tracker scrapes ($DISTRIBYTED_GENTLEMAN_FILE),
+# are woken with a cache of their own ($DISTRIBYTED_GENTLEMAN_CACHE, $DISTRIBYTED_GENTLEMAN_SPACE bytes) and download their
+# rarest pieces (counted from the connected peers' bitfields) within a budget, then seed them.
+COPY patches/gentleman.patch /tmp/gentleman.patch
+RUN git apply /tmp/gentleman.patch
 # Local patch: files of $DISTRIBYTED_ROOT_FILES are served at the root of the mount (admin.py puts links to its page there).
 COPY patches/root_files.go /src/fs/root_files.go
 RUN sed -i 's|\treturn &ContainerFs{s: s}, nil|\taddRootFiles(s)\n\treturn \&ContainerFs{s: s}, nil|' fs/container.go \

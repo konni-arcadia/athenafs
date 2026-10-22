@@ -1,0 +1,29 @@
+diff --git a/torrent/client.go b/torrent/client.go
+index 7cdd52b..93357d4 100644
+--- a/torrent/client.go
++++ b/torrent/client.go
+@@ -3,8 +3,12 @@ package torrent
+ import (
+ 	"fmt"
+ 	"net"
++	"os"
++	"strconv"
+ 	"time"
+ 
++	"golang.org/x/time/rate"
++
+ 	"github.com/anacrolix/dht/v2"
+ 	"github.com/anacrolix/dht/v2/bep44"
+ 	tlog "github.com/anacrolix/log"
+@@ -25,6 +29,11 @@ func NewClient(st storage.ClientImpl, fis bep44.Store, cfg *config.TorrentGlobal
+ 	torrentCfg.DisableIPv6 = cfg.DisableIPv6
+ 	torrentCfg.DisableTCP = cfg.DisableTCP
+ 	torrentCfg.DisableUTP = cfg.DisableUTP
++	// Upload cap for the whole client, in bytes a second ($DISTRIBYTED_UPLOAD_LIMIT, set by the supervisor from its
++	// settings; 0 or unset = unlimited). The burst is at least one 16 KiB chunk, or uploads would stall.
++	if n, err := strconv.Atoi(os.Getenv("DISTRIBYTED_UPLOAD_LIMIT")); err == nil && n > 0 {
++		torrentCfg.UploadRateLimiter = rate.NewLimiter(rate.Limit(n), max(n, 1<<16))
++	}
+ 
+ 	if cfg.IP != "" {
+ 		ip := net.ParseIP(cfg.IP)

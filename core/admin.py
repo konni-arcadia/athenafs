@@ -10,7 +10,7 @@ in its .torrent file (for a magnet, in the metadata that the patched Distribyted
 The torrents served are kept in /data/sources.json; the Distribyted configuration actually used is generated from the base
 configuration (/config/config.yaml, everything above `routes:`) plus those sources.
 """
-import base64, bisect, collections, functools, math, hashlib, sqlite3, hmac, html, http.server, ipaddress, json, os, re, secrets, shutil, signal, socket, subprocess
+import base64, bisect, collections, functools, math, struct, hashlib, sqlite3, hmac, html, http.server, ipaddress, json, os, re, secrets, shutil, signal, socket, subprocess
 import threading, time, urllib.error, urllib.parse, urllib.request
 
 CFG = os.environ.get("DISTRIBYTED_CONFIG", "/config/config.yaml")
@@ -82,8 +82,11 @@ def parse_torrent(raw):
         total = off
     else:
         fl, total = [(info[b"name"].decode("utf-8", "replace"), 0, info[b"length"])], info[b"length"]
+    trackers = [t.decode("utf-8", "replace") for tier in d.get(b"announce-list", []) for t in tier if isinstance(t, bytes)]
+    if not trackers and isinstance(d.get(b"announce"), bytes):
+        trackers = [d[b"announce"].decode("utf-8", "replace")]
     return {"hash": ih, "name": info[b"name"].decode("utf-8", "replace"), "total": total, "multi": b"files" in info,
-            "pieces": p, "npieces": len(p) // 20, "pl": info[b"piece length"], "files": fl}
+            "pieces": p, "npieces": len(p) // 20, "pl": info[b"piece length"], "files": fl, "trackers": trackers}
 
 
 def piece(t, i):
@@ -364,8 +367,21 @@ def base_cap_mb():
     return 2048
 
 
+def env_num(name, default):
+    try:
+        return float(os.environ.get(name) or default)
+    except ValueError:
+        return default
+
+
 def load_settings():
-    d = {"mode": "manual", "cache_mb": base_cap_mb(), "reserve_pct": 20}
+    d = {"mode": "manual", "cache_mb": base_cap_mb(), "reserve_pct": 20,
+         # gentleman mode and upload cap: defaults from .env, changed on the page
+         "gentle_on": os.environ.get("ATHENAFS_GENTLEMAN", "on").lower() not in ("off", "0", "false", "no"),
+         "gentle_slots": int(env_num("ATHENAFS_GENTLEMAN_SLOTS", 3)),
+         "gentle_pct": env_num("ATHENAFS_GENTLEMAN_SPACE_PCT", 5),
+         "gentle_mem_mb": int(env_num("ATHENAFS_GENTLEMAN_MEMORY_MB", 1000)),
+         "upload_kbps": int(env_num("ATHENAFS_UPLOAD_LIMIT_KBPS", 1000))}
     try:
         d.update(json.load(open(SETTINGS)))
     except (OSError, ValueError):
@@ -499,7 +515,13 @@ def start():
     except Exception as e:
         print("ready views:", e)
     generate_config(load_sources())
-    state["proc"] = subprocess.Popen(["/bin/distribyted", "--config", GENERATED, "--http-port", "4444"])
+    st = load_settings()
+    env = dict(os.environ,
+               DISTRIBYTED_UPLOAD_LIMIT=str(int(st["upload_kbps"]) * 1000),
+               DISTRIBYTED_GENTLEMAN_FILE=GENTLEMAN_FILE,
+               DISTRIBYTED_GENTLEMAN_SPACE=str(int(gentle_space_bytes(st))),
+               DISTRIBYTED_GENTLEMAN_CACHE=GENTLEMAN_CACHE)
+    state["proc"] = subprocess.Popen(["/bin/distribyted", "--config", GENERATED, "--http-port", "4444"], env=env)
     state["state"] = "running"
 
 
@@ -615,7 +637,7 @@ def apply_settings(mode, cache_gb, reserve_pct):
     if mode == "manual" and not (256 <= cache_mb <= top):
         state["message"] = (f"a fixed cap must be between 0.3 GB and {top / 1000:.1f} GB right now "
                             f"(free space + current cache − 1 GB): unchanged"); return
-    new = {"mode": mode, "cache_mb": cache_mb, "reserve_pct": reserve}
+    new = dict(load_settings(), mode=mode, cache_mb=cache_mb, reserve_pct=reserve)   # keeps the other settings
 
     def job():
         save_settings(new)
@@ -1113,6 +1135,51 @@ def nice_scale(peak):
     return next(m * k for m in (1, 1.2, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10) if m * k >= peak)
 
 
+def gentleman_view():
+    """Torrents helped by gentleman mode (from Distribyted's stats) with what the trackers say about their swarm."""
+    sw = swarm_info(); st = load_settings(); gs = load_gentle_state()
+    names = {}
+    for r in activity.get("routes") or []:
+        for t in r.get("torrentStats") or []:
+            names[t["hash"]] = (t, r["name"])
+    rows = []
+    for h, x in gs.get("slots", {}).items():
+        t, route = names.get(h, ({}, "?"))
+        g = t.get("gentleman") or {}
+        rows.append({"hash": h, "folder": route, "since": x["since"], "swarm": sw.get(h), "pieces_wanted": g.get("pieces_wanted", 0),
+                     "pieces_held": g.get("pieces_held", 0), "piece_size": g.get("piece_size", 0), "peers": g.get("peers", 0),
+                     "uploaded": g.get("uploaded", 0), "active": bool(g)})
+    known = [x for x in sw.values()]
+    tp = torrent_pieces()
+    for r_ in rows:
+        r_["memory_estimate"] = tp[r_["hash"]]["npieces"] * BYTES_PER_AWAKE_PIECE if r_["hash"] in tp else 0
+    return {"on": st["gentle_on"], "slots": int(st["gentle_slots"]), "space": gentle_space_bytes(st),
+            "memory_budget": int(st["gentle_mem_mb"]) * 1_000_000,
+            "upload_limit": int(st["upload_kbps"]) * 1000, "helped": rows,
+            "swarm": {"scraped": len(known), "dead": sum(1 for x in known if x["seeders"] == 0),
+                      "in_difficulty": sum(1 for x in known if 1 <= x["seeders"] <= 2 and x["leechers"] >= 1),
+                      "last_scrape": max((x["checked"] for x in known), default=0)}}
+
+
+def gentleman_summary_html():
+    v = gentleman_view()
+    if not v["on"]:
+        return "<div class=\"mut small\" style=\"margin-top:8px\">Gentleman mode: off (Settings).</div>"
+    sw = v["swarm"]
+    head = (f"<div class=small style=\"margin-top:10px\"><b>Gentleman mode</b> <span class=mut>· {len(v['helped'])}/{v['slots']} slot(s) "
+            f"used · {mb(v['space'])} reserved · upload cap {rate(v['upload_limit']) if v['upload_limit'] else 'none'} · trackers: "
+            f"{sw['in_difficulty']} torrent(s) in difficulty, {sw['dead']} with no seeder, of {sw['scraped']} answered</span></div>")
+    rows = ""
+    for x in v["helped"]:
+        s_ = x["swarm"] or {}
+        held = x["pieces_held"] * x["piece_size"]
+        rows += (f"<tr><td class=small>{html.escape(x['folder'])} <span class=mut>{x['hash'][:8]}</span></td>"
+                 f"<td class=\"small mut\">{s_.get('seeders', '?')} seeder(s), {s_.get('leechers', '?')} leecher(s)</td>"
+                 f"<td class=\"n small\">{x['pieces_held']}/{x['pieces_wanted']} rare pieces ({mb(held)})</td>"
+                 f"<td class=\"n small\">{mb(x['uploaded'])} sent</td></tr>")
+    return head + (f"<div class=wrap><table>{rows}</table></div>" if rows else "")
+
+
 def histogram_svg():
     """Download and upload rates over the last 10 minutes, one bar per 2 s sample, with a rate scale and a time axis.
     The labels are HTML around the SVG, so that stretching the bars does not stretch the text."""
@@ -1293,8 +1360,21 @@ def render(s=None):
                f"<label><input type=radio name=mode value=auto {'checked' if st['mode'] == 'auto' else ''}> automatic: keep</label>"
                f"<input type=number name=reserve_pct step=1 min=1 max=90 value={st['reserve_pct']:g} style=\"width:70px\"> % of the disk free"
                "<button type=submit>Apply (restarts)</button></form>")
+    capform += ("<form class=add method=post action=/gentleman><span class=mut>Gentleman mode:</span>"
+                f"<label><input type=checkbox name=on value=1 {'checked' if st['gentle_on'] else ''}> help torrents in difficulty</label>"
+                f"<input type=number name=slots min=0 max=20 value={int(st['gentle_slots'])} style=\"width:60px\"> slots"
+                f"<input type=number name=pct min=0 max=50 step=0.5 value={st['gentle_pct']:g} style=\"width:70px\"> % of the cache cap"
+                f"<input type=number name=mem min=0 step=100 value={int(st['gentle_mem_mb'])} style=\"width:80px\"> MB of memory at most"
+                f"<span class=mut>· upload cap</span><input type=number name=upload min=0 step=100 value={int(st['upload_kbps'])} "
+                f"style=\"width:90px\"> kB/s (0 = none)<button type=submit>Apply (restarts)</button></form>"
+                "<div class=\"mut small\">Torrents with 1 or 2 seeders and leechers waiting (asked to the trackers every 6 h) get a "
+                "slot: their rarest pieces are downloaded into a separate part of the cache and seeded under the upload cap, "
+                "until they have 3 seeders again or for 24 h. Each slot keeps one torrent awake, which costs about 3.5 kB of memory "
+                "per piece (a few MB for a small torrent, more than 1 GB for a torrent of tens of TB): torrents that would exceed "
+                "the memory budget are skipped. "
+                "Seeding shows this machine's IP address to more peers: see the Security section of the README.</div>")
     a = activity_view()
-    act = histogram_svg()
+    act = histogram_svg() + gentleman_summary_html()
     if a["torrents"]:
         act += "<div class=wrap><table><tr><th>Torrent</th><th>Folder</th><th class=n>Down</th><th class=n>Up</th><th class=n>Peers</th></tr>"
         for x in a["torrents"][:15]:
@@ -1529,6 +1609,7 @@ API_DOC = [
     ("GET", "/api/usage", "by (file, folder or torrent), depth (folder levels, default 3), folder (only under this share path), limit, offset",
      "What takes the most room in the cache, largest first."),
     ("GET", "/api/activity", "", "Rates per torrent, files that received data in the last 30 s, prefetch queue."),
+    ("GET", "/api/gentleman", "", "Gentleman mode: settings, the torrents helped (swarm from the trackers, rare pieces held and asked for, upload sent), and how many torrents the trackers report in difficulty or with no seeder."),
     ("GET", "/api/folders", "", "Per folder: hidden from the share or not, ready view on or off, its name and location, how many complete files and archives it shows."),
     ("POST", "/api/ready-view", "folder, on (true or false), name (optional)",
      "Turn a folder's ready view on or off: a sibling folder showing the files that are completely in the cache, archives (zip, 7z, rar) opened as folders. Browsing it never downloads. Restarts the service."),
@@ -1637,6 +1718,8 @@ class H(http.server.BaseHTTPRequestHandler):
                 res = api_file(one("path"))
             elif u.path == "/api/usage":
                 res = usage(one("by", "file"), one("limit", "50"), one("offset", "0"), one("depth", "3"), one("folder"))
+            elif u.path == "/api/gentleman":
+                res = gentleman_view()
             elif u.path == "/api/folders":
                 res = folder_settings_status()
             elif u.path == "/api/openapi.json":
@@ -1699,6 +1782,8 @@ class H(http.server.BaseHTTPRequestHandler):
             one = lambda k: (q.get(k) or [""])[0]
             if self.path == "/erase" and (one("h") == "all" or re.fullmatch(r"[0-9a-f]{40}", one("h"))):
                 go(erase, one("h"), one("p"))
+            elif self.path == "/gentleman":
+                go(apply_gentleman, one("on") == "1", one("slots") or "0", one("pct") or "0", one("upload") or "0", one("mem") or "0")
             elif self.path == "/settings":
                 go(apply_settings, one("mode"), one("cache_gb") or "0", one("reserve_pct") or "20")
             elif self.path == "/add" and one("link"):
@@ -2252,6 +2337,202 @@ def set_hidden(folder, hidden):
     state["message"] = f"{folder}: {'hidden from' if hidden else 'shown in'} the share"
     return {"ok": True, "hidden": bool(hidden)}
 
+
+# ---------------------------------------------------------------- gentleman mode: help torrents in difficulty
+#
+# Every 6 h the trackers are asked (scrape) how many seeders and leechers each torrent has. Torrents with 1 or 2 seeders
+# and leechers waiting get a slot (ATHENAFS_GENTLEMAN_SLOTS, 3): Distribyted downloads their rarest pieces into a cache
+# of its own (ATHENAFS_GENTLEMAN_SPACE_PCT of the cache cap), separate from normal use, and seeds them under the upload
+# cap. A torrent leaves its slot when it has 3 seeders again or after 24 h, and waits 24 h before it can come back.
+
+GENTLEMAN_FILE = "/data/gentleman.json"          # read by Distribyted every minute: the torrents to help, the budget
+GENTLEMAN_STATE = "/data/gentleman_state.json"   # {hash: {"since": t}} current slots, {"released": {hash: t}}
+GENTLEMAN_CACHE = "/data/metadata/gentleman-cache"
+SCRAPE_EVERY = 6 * 3600
+BYTES_PER_AWAKE_PIECE = 3500   # measured: 3 helped torrents of 753,000 pieces in all added about 2.6 GB to Distribyted
+
+
+def gentle_space_bytes(st):
+    return max(0, effective_cap_mb(st) * 1e6 * float(st["gentle_pct"]) / 100) if st["gentle_on"] else 0
+
+
+def scrape_udp(url, hashes, timeout=5):
+    """BEP 15 scrape: {info-hash: (seeders, completed, leechers)} for up to 74 hashes."""
+    u = urllib.parse.urlparse(url)
+    addr = (u.hostname, u.port or 80)
+    sk = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sk.settimeout(timeout)
+    try:
+        tid = secrets.randbits(32)
+        sk.sendto(struct.pack(">QII", 0x41727101980, 0, tid), addr)
+        data, _ = sk.recvfrom(2048)
+        action, rtid, conn = struct.unpack(">IIQ", data[:16])
+        if action != 0 or rtid != tid:
+            return {}
+        tid = secrets.randbits(32)
+        sk.sendto(struct.pack(">QII", conn, 2, tid) + b"".join(bytes.fromhex(h) for h in hashes), addr)
+        data, _ = sk.recvfrom(8 + 12 * len(hashes) + 64)
+        action, rtid = struct.unpack(">II", data[:8])
+        if action != 2 or rtid != tid:
+            return {}
+        out = {}
+        for i, h in enumerate(hashes):
+            chunk = data[8 + 12 * i:20 + 12 * i]
+            if len(chunk) == 12:
+                out[h] = struct.unpack(">III", chunk)
+        return out
+    finally:
+        sk.close()
+
+
+def scrape_http(url, hashes, timeout=10):
+    """HTTP scrape (the announce URL with "announce" replaced by "scrape")."""
+    head, _, last = url.rpartition("/")
+    if not last.startswith("announce"):
+        return {}
+    q = "&".join("info_hash=" + urllib.parse.quote(bytes.fromhex(h), safe="") for h in hashes)
+    target = f"{head}/{last.replace('announce', 'scrape', 1)}{'&' if '?' in last else '?'}{q}"
+    check_public_url(target)
+    with urllib.request.urlopen(urllib.request.Request(target, headers={"User-Agent": "athenafs"}), timeout=timeout) as r:
+        d, _ = bdec(r.read(1 << 20))
+    out = {}
+    for k, v in (d.get(b"files") or {}).items():
+        if isinstance(k, bytes) and len(k) == 20 and isinstance(v, dict):
+            out[k.hex()] = (v.get(b"complete", 0), v.get(b"downloaded", 0), v.get(b"incomplete", 0))
+    return out
+
+
+def scrape_all():
+    """Ask the trackers about every known torrent; keep the best answer per torrent (most seeders, then leechers)."""
+    tp = torrent_pieces()
+    hashes = {source_hash(x) for x in load_sources()} & set(tp)
+    by_tracker = {}
+    for h in hashes:
+        for t in tp[h].get("trackers", [])[:6]:
+            by_tracker.setdefault(t, []).append(h)
+    best, dead = {}, set()
+    for tr, hs in sorted(by_tracker.items(), key=lambda x: -len(x[1])):
+        if not tr.startswith(("udp://", "http://", "https://")):
+            continue
+        for k in range(0, len(hs), 70):
+            if tr in dead:
+                break
+            try:
+                res = (scrape_udp if tr.startswith("udp://") else scrape_http)(tr, hs[k:k + 70])
+            except (OSError, ValueError, KeyError, struct.error):
+                dead.add(tr); continue
+            for h, (sd, cp, lc) in res.items():
+                if h in hashes and (sd, lc) > best.get(h, (-1, -1))[:2]:
+                    best[h] = (sd, lc, cp)
+    now = int(time.time())
+    c = db()
+    with c:
+        c.execute("CREATE TABLE IF NOT EXISTS swarm(hash TEXT PRIMARY KEY, seeders INTEGER, leechers INTEGER, completed INTEGER, checked INTEGER)")
+        c.executemany("INSERT OR REPLACE INTO swarm VALUES (?,?,?,?,?)", [(h, sd, lc, cp, now) for h, (sd, lc, cp) in best.items()])
+    c.close()
+    print(f"scrape: {len(best)} of {len(hashes)} torrents answered, {len(by_tracker) - len(dead)} trackers up")
+    return best
+
+
+def swarm_info():
+    try:
+        c = db()
+        rows = c.execute("SELECT hash, seeders, leechers, completed, checked FROM swarm").fetchall()
+        c.close()
+    except sqlite3.Error:
+        return {}
+    return {h: {"seeders": sd, "leechers": lc, "completed": cp, "checked": ch} for h, sd, lc, cp, ch in rows}
+
+
+def load_gentle_state():
+    try:
+        return json.load(open(GENTLEMAN_STATE))
+    except (OSError, ValueError):
+        return {"slots": {}, "released": {}}
+
+
+def slots_over_memory(slots, st, h):
+    """True for the slots that no longer fit the memory budget (it was lowered): the most recent ones go first."""
+    tp = torrent_pieces()
+    total = 0
+    for k in sorted(slots, key=lambda k: slots[k]["since"]):
+        total += tp[k]["npieces"] * BYTES_PER_AWAKE_PIECE if k in tp else 0
+        if k == h:
+            return total > int(st["gentle_mem_mb"]) * 1e6
+    return False
+
+
+def plan_gentleman():
+    """Choose the torrents to help and write the list Distribyted reads."""
+    st = load_settings(); gs = load_gentle_state(); sw = swarm_info(); now = time.time()
+    slots = gs.get("slots", {}); released = {h: t for h, t in gs.get("released", {}).items() if now - t < 86400}
+    known = {source_hash(x) for x in load_sources()}
+    for h in list(slots):   # leave the slot: enough seeders again, 24 h passed, or the torrent is gone
+        x = sw.get(h, {})
+        if (h not in known or x.get("seeders", 0) >= 3 or now - slots[h]["since"] > 86400 or not st["gentle_on"]
+                or slots_over_memory(slots, st, h)):
+            slots.pop(h); released[h] = now
+    if st["gentle_on"]:
+        cands = sorted((h for h, x in sw.items() if h in known and h not in slots and h not in released
+                        and 1 <= x["seeders"] <= 2 and x["leechers"] >= 1),
+                       key=lambda h: -sw[h]["leechers"] / sw[h]["seeders"])
+        # memory budget: an awake torrent costs about BYTES_PER_AWAKE_PIECE per piece (a 30 TB torrent of 475,000 pieces:
+        # 1.6 GB); take candidates in order while they fit, skip the ones too large for what is left
+        tp = torrent_pieces()
+        cost = lambda h: tp[h]["npieces"] * BYTES_PER_AWAKE_PIECE if h in tp else 0
+        left = int(st["gentle_mem_mb"]) * 1e6 - sum(cost(h) for h in slots)
+        for h in cands:
+            if len(slots) >= int(st["gentle_slots"]):
+                break
+            if cost(h) <= left:
+                slots[h] = {"since": now}; left -= cost(h)
+    gs = {"slots": slots, "released": released}
+    with open(GENTLEMAN_STATE + ".tmp", "w") as f:
+        json.dump(gs, f)
+    os.replace(GENTLEMAN_STATE + ".tmp", GENTLEMAN_STATE)
+    space = gentle_space_bytes(st)
+    per = int(space / max(1, len(slots))) if slots else 0
+    with open(GENTLEMAN_FILE + ".tmp", "w") as f:
+        json.dump({"torrents": [{"hash": h, "budget": per} for h in slots]}, f)
+    os.replace(GENTLEMAN_FILE + ".tmp", GENTLEMAN_FILE)
+    return gs
+
+
+def gentleman_loop():
+    last_scrape = 0
+    try:
+        last_scrape = max((x["checked"] for x in swarm_info().values()), default=0)
+    except Exception:
+        pass
+    time.sleep(120)   # let the start-up settle
+    while True:
+        try:
+            if time.time() - last_scrape > SCRAPE_EVERY:
+                scrape_all(); last_scrape = time.time()
+            plan_gentleman()
+        except Exception as e:
+            print("gentleman:", e)
+        time.sleep(600)
+
+
+def apply_gentleman(on, slots, pct, upload_kbps, mem_mb):
+    """Validate and apply the gentleman settings and the upload cap (restarts the service)."""
+    try:
+        slots, pct, up, mem = int(slots), float(pct), int(float(upload_kbps)), int(float(mem_mb))
+    except ValueError:
+        state["message"] = "invalid number: settings unchanged"; return
+    if not (0 <= slots <= 20 and 0 <= pct <= 50 and 0 <= up <= 1_000_000 and 0 <= mem <= 64000):
+        state["message"] = "slots 0-20, space 0-50 %, memory 0-64000 MB, upload 0-1000000 kB/s: settings unchanged"; return
+    new = dict(load_settings(), gentle_on=bool(on), gentle_slots=slots, gentle_pct=pct, upload_kbps=up, gentle_mem_mb=mem)
+
+    def job():
+        save_settings(new)
+        plan_gentleman()
+        return (f"gentleman mode {'on' if on else 'off'} ({slots} slot(s), {pct:g} % of the cache cap, {mem} MB of memory); "
+                f"upload cap {'none' if not up else str(up) + ' kB/s'}")
+    exclusive(job)
+
+
 def activity_view():
     now = time.time()
     return {"down": activity["down"], "up": activity["up"], "net_rx": activity["net_rx"], "net_tx": activity["net_tx"],
@@ -2306,6 +2587,7 @@ def main():
     threading.Thread(target=indexer, daemon=True).start()
     threading.Thread(target=snapshotter, daemon=True).start()
     threading.Thread(target=ready_view_writer, daemon=True).start()
+    threading.Thread(target=gentleman_loop, daemon=True).start()
     for _ in range(PREFETCH_WORKERS):
         threading.Thread(target=prefetch_worker, daemon=True).start()
     srv = http.server.ThreadingHTTPServer(("0.0.0.0", 8080), H)
