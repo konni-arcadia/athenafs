@@ -26,3 +26,4 @@ Corrections (rows are not rewritten):
 | 2026-10-21T20:12Z | 74e2f59 | 642 / 637 / 12512828 / 446609 / 258.9 TB | 0 | 9 | 637 | 10 | 1.1 | 0.7 | 0.00 | 0.00 | 0.00 | 0.01 | settings through .env; inline rename |
 | 2026-10-21T21:57Z | 7213a7a | 642 / 637 / 12512828 / 446609 / 258.9 TB | 0 | 8 | 637 | 19 | 1.1 | 0.7 | 0.01 | 0.00 | 0.00 | 0.01 | security: capabilities dropped, no-new-privileges |
 | 2026-10-22T13:03Z | c43c02d | 642 / 637 / 12512828 / 446609 / 258.9 TB | 0 | 16 | 637 | 23 | 1.4 | 0.4 | 0.00 | 0.00 | 0.00 | 0.02 | archive views (BigCollection_ZIP on, 732 complete archives) |
+| 2026-10-22T16:22Z | f960602 | 642 / 637 / 12512828 / 446609 / 258.9 TB | 1 | 19 | 637 | 10 | 1.8 | 0.4 | 0.00 | 0.00 | 0.00 | 0.02 | baseline before the ~1000-torrent import |
