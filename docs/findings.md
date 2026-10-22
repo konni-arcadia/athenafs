@@ -406,6 +406,14 @@ Open points (2026-10-22):
   - Not wanted for now: feeding the files inside archives to the search (the owner is not convinced).
   - Workflow: search on the page, "Cache", then browse the archive view over SMB.
   - Before building it: measure Finder on an archive view with a few hundred complete archives.
+  - **First attempt (2026-10-22), with Distribyted's own archive mode, not usable:** the 706 small zips of one
+    collection (296 MB) were cached with "Cache all" (131 s, no failure), then the core was restarted with
+    `ATHENAFS_ARCHIVES=on`. Over 8 minutes the share root never listed (`ls` stuck in uninterruptible wait), Distribyted
+    used about 1.3 cores and 3.2 GB, and 17 MB were received (health checks included: no download storm, but no answer).
+    That mode makes every zip of every torrent an archive filesystem (about 447,000 files here) and every lookup walks all
+    of them (`getFileFromFs` is a linear scan over the filesystems, the same scan patched for folder prefixes). So the
+    archive view has to be our own: only the complete archives, with an indexed lookup, never Distribyted's global mode.
+    The Finder measurement will be made on a first prototype of that view.
   - Later, only if needed: an archive view as a separate SMB share with its own account. The share name itself is already
     a setting (`SMB_SHARE`).
 - **Not wanted yet:** pinning files in the cache (protecting them from eviction).

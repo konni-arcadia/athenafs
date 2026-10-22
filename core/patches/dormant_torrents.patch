@@ -256,7 +256,7 @@ index 9ac3f7e..b5e7668 100644
  		timeout:    500,
  	}
 diff --git a/torrent/service.go b/torrent/service.go
-index 6d27b86..f528604 100644
+index 6d27b86..cd438ed 100644
 --- a/torrent/service.go
 +++ b/torrent/service.go
 @@ -3,7 +3,9 @@ package torrent
@@ -334,7 +334,7 @@ index 6d27b86..f528604 100644
 +		}
 +		s.s.ClearDormant(r, h)
 +		s.s.Add(r, t)
-+		s.log.Info().Str("hash", h).Str("route", r).Msg("torrent woken (a file was opened)")
++		s.log.Info().Str("hash", h).Str("route", r).Msg("torrent woken (a file was opened, or a health check)")
 +		return t, nil
 +	}
 +	sleep := func(l *fs.Lazy, t *torrent.Torrent) {

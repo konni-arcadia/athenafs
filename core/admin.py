@@ -10,7 +10,7 @@ in its .torrent file (for a magnet, in the metadata that the patched Distribyted
 The torrents served are kept in /data/sources.json; the Distribyted configuration actually used is generated from the base
 configuration (/config/config.yaml, everything above `routes:`) plus those sources.
 """
-import base64, bisect, collections, functools, hashlib, sqlite3, hmac, html, http.server, ipaddress, json, os, re, secrets, shutil, signal, socket, subprocess
+import base64, bisect, collections, functools, math, hashlib, sqlite3, hmac, html, http.server, ipaddress, json, os, re, secrets, shutil, signal, socket, subprocess
 import threading, time, urllib.error, urllib.parse, urllib.request
 
 CFG = os.environ.get("DISTRIBYTED_CONFIG", "/config/config.yaml")
@@ -834,6 +834,13 @@ input[type=text],input[type=number],input[type=search],textarea{{font:inherit;pa
 .add{{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:6px 0}}.add .l{{flex:1 1 380px}}.add .f{{flex:0 1 180px}}
 .bar{{height:4px;background:var(--chip);border-radius:2px;margin-top:4px;overflow:hidden}}.bar i{{display:block;height:100%;background:var(--acc)}}
 .sub td{{padding:4px 6px 4px 22px;font-size:14px}}
+.tile.pie{{display:flex;justify-content:space-between;align-items:center;gap:8px}}.tile.pie b{{font-size:20px}}
+.donut{{width:64px;height:64px;border-radius:50%;flex:none;position:relative}}
+.donut:after{{content:"";position:absolute;inset:14px;border-radius:50%;background:var(--card)}}
+.legend{{font-size:12px;color:var(--mut)}}.legend i{{display:inline-block;width:9px;height:9px;border-radius:2px;margin:0 3px 0 6px}}
+.histw{{display:flex;gap:6px;margin:4px 0}}.yax{{position:relative;width:64px;height:70px;flex:none;font-size:11px;color:var(--mut)}}
+.yax span{{position:absolute;right:0;transform:translateY(-50%);white-space:nowrap}}.hplot{{flex:1;min-width:0}}
+.hist{{width:100%;height:70px;display:block}}.xax{{display:flex;justify-content:space-between;font-size:11px;color:var(--mut)}}
 a{{color:var(--acc)}}a.seg{{color:inherit;text-decoration:none;border-bottom:1px dotted var(--mut)}}a.seg:hover{{color:var(--acc)}}
 .pill.mut{{color:var(--mut)}}.warn{{color:var(--warn)}}.brk{{word-break:break-word}}#sr td.small{{word-break:break-word}}#sr td button{{padding:1px 8px;font-size:12px}}
 </style>
@@ -854,19 +861,11 @@ a{{color:var(--acc)}}a.seg{{color:inherit;text-decoration:none;border-bottom:1px
 <div class="mut small" style="margin-top:4px">Click a folder in a result to list everything under it (<code>folder:path</code>); "Cache" reads files into the cache.</div>
 <div id=srmsg style="margin-top:8px"></div><div id=sr class="small" style="margin-top:8px"></div>
 </section>
-<section class=card><h2>Largest in the cache</h2>
-<div class=add><span class="mut small">by</span>
-<label class=small><input type=radio name=uby value=file checked> file</label>
-<label class=small><input type=radio name=uby value=folder> folder</label>
-<label class=small><input type=radio name=uby value=torrent> torrent</label>
-<span id=utot class="mut small"></span></div>
-<div id=ures class="small wrap"></div>
-</section>
 <main id=m>
 {msg}
 <div class=tiles>
-<div class=tile><span>Cache</span><b>{cache}</b><span>{cap}</span><div class=bar><i style="width:{cachepct}%"></i></div></div>
-<div class=tile><span>Disk free</span><b>{dfree}</b><span>of {dtotal}</span></div>
+<div class="tile pie"><div><span>Cache</span><b>{cache}</b><span>{cap}</span></div>{cachepie}</div>
+<div class="tile pie"><div><span>Disk free</span><b>{dfree}</b><span>of {dtotal}</span></div>{diskpie}</div>
 <div class=tile><span>Download</span><b>{down}</b><span>upload {up} · received since start {rx}</span></div>
 <div class=tile><span>Torrents</span><b>{ntor}</b><span>in {nfold} folders · {nawake} awake</span></div>
 </div>
@@ -880,6 +879,14 @@ a{{color:var(--acc)}}a.seg{{color:inherit;text-decoration:none;border-bottom:1px
 {rows}
 </table></div>{unknown}</section>
 </main>
+<section class=card><details id=usage><summary><b>Largest in the cache</b> <span class="mut small">by file, folder or torrent, with Erase</span></summary><div style="margin-top:10px">
+<div class=add><span class="mut small">by</span>
+<label class=small><input type=radio name=uby value=file checked> file</label>
+<label class=small><input type=radio name=uby value=folder> folder</label>
+<label class=small><input type=radio name=uby value=torrent> torrent</label>
+<span id=utot class="mut small"></span></div>
+<div id=ures class="small wrap"></div>
+</div></details></section>
 <section class=card><details><summary><b>Settings</b> <span class="mut small">cache cap, erase everything</span></summary>
 <div style="margin-top:10px">{capform}
 <div class="mut small">Largest cache cap possible now: {dmax} (free space + what is already cached − 1 GB).</div>
@@ -941,7 +948,8 @@ async function loadUsage(){{
       +(x.size?' <span class=mut>of '+sz(x.size)+'</span>':'')+'</td><td class=n><button class=danger data-uerase="'+esc(what)+'">Erase</button></td></tr>'}}).join('')+'</table>';
 }}
 document.querySelectorAll('input[name=uby]').forEach(i=>i.addEventListener('change',loadUsage));
-loadUsage(); setInterval(()=>{{if(!document.querySelector('#ures [data-armed]'))loadUsage()}},30000);
+document.getElementById('usage').addEventListener('toggle',e=>{{if(e.target.open)loadUsage()}});  // folded: loaded when opened
+setInterval(()=>{{if(document.getElementById('usage').open&&!document.querySelector('#ures [data-armed]'))loadUsage()}},30000);
 document.getElementById('q').addEventListener('input',()=>{{clearTimeout(st);st=setTimeout(()=>runSearch(false),250)}});
 document.addEventListener('click',e=>{{
   const t=e.target;
@@ -993,6 +1001,52 @@ def node(ih, n, dis):
     more = f"<div class=mut>… {len(kids) - 300} more</div>" if len(kids) > 300 else ""
     return (f"<details data-k=\"{ih}/{html.escape(n['path'], quote=True)}\"><summary>{html.escape(n['name'])}/ "
             f"<span class=sz>≈ {mb(n['size'])} {button}</span></summary><div class=tree>{body}{more}</div></details>")
+
+
+def donut(parts, title):
+    """Small pie (donut) from [(value, css colour)], drawn with a conic gradient; title = tooltip."""
+    total = sum(v for v, _ in parts) or 1
+    stops, acc = [], 0.0
+    for v, c in parts:
+        a = acc; acc += v / total * 100
+        stops.append(f"{c} {a:.2f}% {acc:.2f}%")
+    return f"<div class=donut title=\"{html.escape(title, quote=True)}\" style=\"background:conic-gradient({','.join(stops)})\"></div>"
+
+
+def nice_scale(peak):
+    """Top of the histogram's scale: the smallest round value at or above the peak of the last 10 minutes. Recomputed at
+    every refresh, so the scale follows the data up and down; the fine steps keep the empty space above the peak small."""
+    if peak <= 0:
+        return 1000
+    k = 10 ** math.floor(math.log10(peak))
+    return next(m * k for m in (1, 1.2, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10) if m * k >= peak)
+
+
+def histogram_svg():
+    """Download and upload rates over the last 10 minutes, one bar per 2 s sample, with a rate scale and a time axis.
+    The labels are HTML around the SVG, so that stretching the bars does not stretch the text."""
+    h = list(rate_history)
+    if not h:
+        return ""
+    peak = max(max(d, u) for _, d, u in h)
+    top = nice_scale(peak)
+    n, w, ht = 300, 600, 60
+    bw = w / n
+    off = n - len(h)
+    y = lambda v: ht - min(v, top) / top * ht
+    grid = "".join(f"<line x1=0 y1=\"{y(top * f):.1f}\" x2={w} y2=\"{y(top * f):.1f}\" stroke=\"var(--line)\" stroke-dasharray=\"3 3\"/>"
+                   for f in (0.5, 1))
+    bars = "".join(f"<rect x=\"{(off + i) * bw:.1f}\" y=\"{y(d):.1f}\" width=\"{bw:.2f}\" height=\"{ht - y(d):.1f}\" fill=\"var(--acc)\"/>"
+                   for i, (_, d, u) in enumerate(h) if d > 0)
+    bars += "".join(f"<rect x=\"{(off + i) * bw:.1f}\" y=\"{y(u):.1f}\" width=\"{bw:.2f}\" height=\"{ht - y(u):.1f}\" fill=\"var(--warn)\" opacity=\".6\"/>"
+                    for i, (_, d, u) in enumerate(h) if u > 0)
+    ylab = "".join(f"<span style=\"top:{(1 - f) * 100:.0f}%\">{rate(top * f) if f else '0'}</span>" for f in (1, 0.5, 0))
+    return (f"<div class=histw><div class=yax>{ylab}</div><div class=hplot>"
+            f"<svg class=hist viewBox=\"0 0 {w} {ht}\" preserveAspectRatio=\"none\" role=img aria-label=\"rates over the last 10 minutes\">"
+            f"{grid}<line x1=0 y1={ht} x2={w} y2={ht} stroke=\"var(--mut)\"/>{bars}</svg>"
+            f"<div class=xax><span>-10 min</span><span>-5 min</span><span>now</span></div></div></div>"
+            f"<div class=legend>peak {rate(peak) if peak else '0'} · now {rate(h[-1][1])} down, {rate(h[-1][2])} up · "
+            f"<i style=\"background:var(--acc)\"></i>download<i style=\"background:var(--warn)\"></i>upload</div>")
 
 
 def ask_form(field, value, dis, label, question, current):
@@ -1069,7 +1123,7 @@ def render(s=None):
                f"<input type=number name=reserve_pct step=1 min=1 max=90 value={st['reserve_pct']:g} style=\"width:70px\"> % of the disk free"
                "<button type=submit>Apply (restarts)</button></form>")
     a = activity_view()
-    act = ""
+    act = histogram_svg()
     if a["torrents"]:
         act += "<div class=wrap><table><tr><th>Torrent</th><th>Folder</th><th class=n>Down</th><th class=n>Up</th><th class=n>Peers</th></tr>"
         for x in a["torrents"][:15]:
@@ -1099,7 +1153,14 @@ def render(s=None):
             act += (f"<tr><td class=small>{html.escape(f['path'])}</td><td class=\"n small\">{mb(f['bytes'])}</td>"
                     f"<td class=\"n small mut\">{f['ago']} s ago</td></tr>")
         act += "</table></div>"
-    return PAGE.format(capform=capform, act=act, down=rate(a["down"]), up=rate(a["up"]), dfree=mb(s["disk_free"]), dtotal=mb(s["disk_total"]), dmax=mb(s["max_cap_mb"] * 1e6),
+    capb = capmb * 1e6
+    cachepie = donut([(s["total_cache"], "var(--acc)"), (max(capb - s["total_cache"], 0), "var(--chip)")],
+                     f"cache {mb(s['total_cache'])} of {mb(capb)}") if capb else ""
+    other = max(s["disk_total"] - s["disk_free"] - s["total_cache"], 0)
+    diskpie = (donut([(other, "var(--mut)"), (s["total_cache"], "var(--acc)"), (s["disk_free"], "var(--chip)")],
+                     f"other data {mb(other)} · cache {mb(s['total_cache'])} · free {mb(s['disk_free'])}")
+               + "") if s["disk_total"] else ""
+    return PAGE.format(capform=capform, act=act, cachepie=cachepie, diskpie=diskpie, down=rate(a["down"]), up=rate(a["up"]), dfree=mb(s["disk_free"]), dtotal=mb(s["disk_total"]), dmax=mb(s["max_cap_mb"] * 1e6),
                        state=html.escape(s["state"]), pillcls="ok" if s["state"] == "running" else "busy",
                        cache=mb(s["total_cache"]), cap=cap, cachepct=pct, msg=msg, rows=rows, sources=srows, unknown=unk,
                        dis=dis, rx=mb(s["network_rx"]), tx=mb(s["network_tx"]), ntor=len(s["sources"]), nfold=len(folders),
@@ -1447,6 +1508,7 @@ class H(http.server.BaseHTTPRequestHandler):
 # ---------------------------------------------------------------- activity (rates, files receiving pieces)
 
 WINDOW = 30   # seconds of history for "files receiving data"
+rate_history = collections.deque(maxlen=300)   # (time, down, up) every 2 s: the last 10 minutes, for the histogram
 activity = {"at": 0, "routes": [], "down": 0, "up": 0, "net_rx": 0, "net_tx": 0, "torrents": [], "files": []}
 
 
@@ -1517,6 +1579,7 @@ def sampler():
         for at, ih, path, n in recent:
             f = files.setdefault(path, {"path": path, "hash": ih, "bytes": 0, "last": 0})
             f["bytes"] += n; f["last"] = max(f["last"], at)
+        rate_history.append((now, sum(x["down"] for x in rows), sum(x["up"] for x in rows)))
         activity.update(at=now, routes=routes, torrents=sorted(rows, key=lambda x: -(x["down"] + x["up"])),
                         down=sum(x["down"] for x in rows), up=sum(x["up"] for x in rows),
                         files=sorted(files.values(), key=lambda f: -f["last"])[:50])
