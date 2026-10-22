@@ -22,7 +22,7 @@ services:
       DISTRIBYTED_HEALTH_PARALLEL: "${ATHENAFS_HEALTH_PARALLEL:-2}" # health checks at a time
       DISTRIBYTED_HEALTH_ORDER: /data/health-order.txt
       DISTRIBYTED_ROOT_FILES: /data/share-root      # files shown at the root of the share (links to the page)
-      DISTRIBYTED_ARCHIVE_VIEWS: /data/archive-views.json   # written by admin.py: complete archives per archive view
+      DISTRIBYTED_READY_VIEWS: /data/ready-views.json   # written by admin.py: complete files per ready view
       ATHENAFS_COMMIT: "${ATHENAFS_COMMIT:-unknown}"   # set by scripts/up.sh, checked by scripts/measure.sh
       ATHENAFS_WARNINGS: "${ATHENAFS_WARNINGS:-}"   # set by scripts/up.sh: risky exposures, shown on the page
       ATHENAFS_PASSWORD: "${ATHENAFS_PASSWORD:-}"   # page and API password (user "admin"); empty = none
@@ -63,3 +63,4 @@ services:
         read_only: true
         bind:
           propagation: rslave
+      - ${DATA:-./data}/state/smb:/etc/athenafs:ro   # folders hidden from the share, written by the core's supervisor

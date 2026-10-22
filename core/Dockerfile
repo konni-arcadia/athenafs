@@ -67,10 +67,10 @@ RUN git apply /tmp/health_check.patch
 # walk up the path's parents instead (a few map lookups).
 COPY patches/fs_indexed_lookup.patch /tmp/fs_indexed_lookup.patch
 RUN git apply /tmp/fs_indexed_lookup.patch
-# Local patch: archive views ($DISTRIBYTED_ARCHIVE_VIEWS, written by admin.py): extra folders at the root of the mount
-# showing the archives of a route as folders, only those listed (the ones completely in the cache), reread every 30 s.
-COPY patches/archive_views.patch /tmp/archive_views.patch
-RUN git apply /tmp/archive_views.patch
+# Local patch: ready views ($DISTRIBYTED_READY_VIEWS, written by admin.py): extra folders at the root of the mount showing
+# the files of a route that are listed (the ones completely in the cache), archives opened as folders, reread every 30 s.
+COPY patches/ready_views.patch /tmp/ready_views.patch
+RUN git apply /tmp/ready_views.patch
 # Local patch: files of $DISTRIBYTED_ROOT_FILES are served at the root of the mount (admin.py puts links to its page there).
 COPY patches/root_files.go /src/fs/root_files.go
 RUN sed -i 's|\treturn &ContainerFs{s: s}, nil|\taddRootFiles(s)\n\treturn \&ContainerFs{s: s}, nil|' fs/container.go \

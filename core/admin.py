@@ -258,15 +258,16 @@ def rename(new, route="", sid=""):
             if s["id"] in ids:
                 s["route"] = new
         save_sources(cur)
-        if route:   # its archive view follows (its name too, unless it was customised)
-            av = load_archive_view_settings()
-            if old in av and not any(s["route"] == old for s in cur):
-                v = av.pop(old)
-                if v["name"] == f"{old}_ZIP":
-                    v["name"] = sanitize(f"{new}_ZIP")
-                if new not in av:
-                    av[new] = v
-                save_archive_view_settings(av)
+        if route:   # its settings follow (the ready view's name too, unless it was customised)
+            fs_ = load_folder_settings()
+            if old in fs_ and not any(s["route"] == old for s in cur):
+                v = fs_.pop(old)
+                if v.get("view") == view_default(old):
+                    v["view"] = view_default(new)
+                if new not in fs_:
+                    fs_[new] = v
+                save_folder_settings(fs_)
+                write_hidden_folders()
         if route:   # a whole folder: later adds of the old name follow
             a = {k: (new if v == old else v) for k, v in load_aliases().items()}
             a[old] = new
@@ -463,9 +464,10 @@ def start():
     except OSError as e:
         print("health order:", e)
     try:
-        write_archive_views()   # the views (their names) are created by Distribyted at start-up
+        write_ready_views()   # the views (their names) are created by Distribyted at start-up
+        write_hidden_folders()
     except Exception as e:
-        print("archive views:", e)
+        print("ready views:", e)
     generate_config(load_sources())
     state["proc"] = subprocess.Popen(["/bin/distribyted", "--config", GENERATED, "--http-port", "4444"])
     state["state"] = "running"
@@ -678,6 +680,37 @@ def add_links(text, wanted_route=""):
     exclusive(job)
 
 
+def remove_folder(route, erase_data):
+    """Remove every torrent of a folder, with or without its cached data, with one restart."""
+    mine = [x for x in load_sources() if x["route"] == route]
+    if not mine:
+        state["message"] = "unknown folder: nothing removed"; return
+
+    def job():
+        hashes = {source_hash(x) for x in mine} - {None}
+        msg = f"removed folder {route} ({len(mine)} torrent(s))"
+        if erase_data:
+            n, sz = delete_pieces(cached_pieces_of(hashes))
+            msg += f"; erased {n} pieces, {sz / 1e6:.0f} MB"
+        else:
+            msg += "; data kept"
+        for x in mine:
+            h = source_hash(x)
+            if x["kind"] == "file":
+                try: os.remove(x["value"])
+                except OSError: pass
+            if h:
+                try: os.remove(os.path.join(METAINFO, h + ".torrent"))
+                except OSError: pass
+        save_sources([x for x in load_sources() if x["route"] != route])
+        st = load_folder_settings()
+        if st.pop(route, None) is not None:   # its ready view and visibility go with it
+            save_folder_settings(st)
+            write_hidden_folders()
+        return msg
+    exclusive(job)
+
+
 def remove_source(sid, erase_data):
     srcs = load_sources()
     src = next((s for s in srcs if s["id"] == sid), None)
@@ -807,7 +840,9 @@ def network():
 
 
 def rate(n):
-    return "0" if n < 1e3 else f"{n / 1e3:.0f} kB/s" if n < 1e6 else f"{n / 1e6:.1f} MB/s"
+    if n < 1:
+        return "0"
+    return f"{n:.0f} B/s" if n < 1e3 else f"{n / 1e3:.0f} kB/s" if n < 1e6 else f"{n / 1e6:.1f} MB/s"
 
 
 def mb(n):
@@ -855,10 +890,14 @@ input[type=text],input[type=number],input[type=search],textarea{{font:inherit;pa
 .yax span{{position:absolute;right:0;transform:translateY(-50%);white-space:nowrap}}.hplot{{flex:1;min-width:0}}
 .hist{{width:100%;height:70px;display:block}}.xax{{display:flex;justify-content:space-between;font-size:11px;color:var(--mut)}}
 a{{color:var(--acc)}}a.seg{{color:inherit;text-decoration:none;border-bottom:1px dotted var(--mut)}}a.seg:hover{{color:var(--acc)}}
-.pill.mut{{color:var(--mut)}}.warn{{color:var(--warn)}}.brk{{word-break:break-word}}#sr td.small{{word-break:break-word}}#sr td button{{padding:1px 8px;font-size:12px}}
+.pill.mut{{color:var(--mut)}}.warn{{color:var(--warn)}}
+details.sec{{position:relative}}details.sec>summary{{list-style:none;cursor:pointer}}details.sec>summary::-webkit-details-marker{{display:none}}
+.secbox{{position:absolute;z-index:5;top:30px;left:0;width:min(560px,90vw);background:var(--card);border:1px solid var(--line);
+border-left:3px solid var(--warn);border-radius:8px;padding:10px 14px;box-shadow:0 4px 16px rgba(0,0,0,.12);font-size:14px}}
+.secbox ul{{margin:0 0 8px;padding-left:18px}}.secbox li{{margin:4px 0}}.brk{{word-break:break-word}}#sr td.small{{word-break:break-word}}#sr td button{{padding:1px 8px;font-size:12px}}
 </style>
 <div class=page>
-<header><h1>athenafs</h1><span id=pill class="pill {pillcls}">{state}</span></header>
+<header><h1>athenafs</h1><span id=pill class="pill {pillcls}">{state}</span>{secwarn}</header>
 <section class=card><h2>Add torrents</h2>
 <form class=add method=post action=/add>
   <textarea class=l name=link rows=2 placeholder="magnet:?xt=urn:btih:…  or  https://…/file.torrent&#10;several: one per line" required></textarea>
@@ -887,10 +926,11 @@ a{{color:var(--acc)}}a.seg{{color:inherit;text-decoration:none;border-bottom:1px
 <tr><th>Folder</th><th>Torrents</th><th class=n>Size</th><th>Status</th></tr>
 {sources}
 </table></div></section>
-<section class=card><h2>Cache</h2><div class=wrap><table>
+<section class=card><details data-k=cache-section><summary><b>Cache</b> <span class="mut small">{ncached} torrent(s) with cached
+data, {cache} · per torrent and file, with Erase</span></summary><div class=wrap style="margin-top:10px"><table>
 <tr><th>Torrent</th><th class=n>Size</th><th class=n>Cached</th><th></th></tr>
 {rows}
-</table></div>{unknown}</section>
+</table></div>{unknown}</details></section>
 </main>
 <section class=card><details id=usage><summary><b>Largest in the cache</b> <span class="mut small">by file, folder or torrent, with Erase</span></summary><div style="margin-top:10px">
 <div class=add><span class="mut small">by</span>
@@ -924,7 +964,7 @@ function row(f){{
   const label=f.status=='partial'?'partial '+pct+'%':f.status;
   const hl='<div class="small '+(f.dead?'warn':'mut')+'">'+esc(f.health_text||'')+'</div>';
   const btn=['cached','queued','caching'].includes(f.status)?'':'<button class=cache data-p="'+esc(f.path)+'">Cache</button>';
-  const lk=' <span class=mut>· <a href="'+esc(f.smb_url)+'" title="'+esc(f.smb_url)+'">open</a> · <a href=# data-copy="'+esc(f.unc_path)+'" title="'+esc(f.unc_path)+'">copy \\\\\\\\ path</a></span>';
+  const lk=f.smb_url?' <span class=mut>· <a href="'+esc(f.smb_url)+'" title="'+esc(f.smb_url)+'">open</a> · <a href=# data-copy="'+esc(f.unc_path)+'" title="'+esc(f.unc_path)+'">copy \\\\\\\\ path</a></span>':' <span class=mut>· hidden from the share</span>';
   return '<tr><td class=small>'+pathHtml(f.path)+lk+hl+'</td><td class=n>'+sz(f.size)+'</td><td class=n><span class="pill '+(badge[f.status]||'')+'">'+esc(label)+'</span></td><td class=n>'+btn+'</td></tr>';
 }}
 async function runSearch(more){{
@@ -1063,23 +1103,44 @@ def histogram_svg():
             f"<i style=\"background:var(--acc)\"></i>download<i style=\"background:var(--warn)\"></i>upload</div>")
 
 
-def archive_view_cell(route, dis, st, lists):
-    """Folder row: its archive view (complete archives shown as folders in a sibling folder), with on/off and rename."""
+def folder_settings_cell(route, dis, st, lists):
+    """Folder row: visibility in the share, and its ready view (complete files, archives opened, in a sibling folder)."""
     r = html.escape(route, quote=True)
-    hidden = f"<input type=hidden name=folder value=\"{r}\">"
-    if route not in st:
-        return (f"<span class=mut>Archive view: off</span> <form method=post action=/archive-view>{hidden}<input type=hidden name=on value=1>"
-                f"<button {dis} title=\"A sibling folder showing the archives (zip, 7z, rar) of this folder that are completely in the "
-                f"cache, opened as folders: browsing it never downloads anything. Restarts the service.\">Turn on archive view</button></form>")
-    name = st[route]["name"]; loc = locations(name, True)
-    return (f"<span class=mut>Archive view:</span> <b>{html.escape(name)}</b> "
-            f"<span class=mut>· {len(lists.get(route, []))} complete archive(s) · <a href=\"{html.escape(loc['smb_url'])}\">open</a> · "
-            f"<a href=# data-copy=\"{html.escape(loc['unc_path'], quote=True)}\">copy \\\\ path</a></span> "
-            f"<form method=post action=/archive-view class=ask data-field=name data-current=\"{html.escape(name, quote=True)}\" "
-            f"title=\"New name for the archive view (it must not be the name of a folder or of another view):\">{hidden}"
-            f"<input type=hidden name=on value=1><button type=button class=askopen {dis}>Rename view</button></form> "
-            f"<form method=post action=/archive-view>{hidden}<input type=hidden name=on value=0>"
-            f"<button class=danger {dis} data-confirm=\"Turn off the archive view {html.escape(name, quote=True)}? (restarts the service; the cache is kept)\">Turn off</button></form>")
+    field = f"<input type=hidden name=folder value=\"{r}\">"
+    v = st.get(route, {})
+    if v.get("hidden"):
+        vis = (f"<span class=mut>Normal view:</span> <b>hidden from the share</b> <form method=post action=/folder-visibility>{field}"
+               f"<input type=hidden name=hidden value=0><button {dis}>Show in the share</button></form>")
+    else:
+        vis = (f"<span class=mut>Normal view: shown</span> <form method=post action=/folder-visibility>{field}"
+               f"<input type=hidden name=hidden value=1><button {dis} title=\"Hide this folder from SMB clients (a few seconds, no "
+               f"restart). It stays in the catalogue: search, Cache and its ready view keep working. With the ready view on, the share "
+               f"then shows only what is ready.\">Hide from the share</button></form>")
+    if not v.get("view"):
+        ready = (f"<span class=mut>Ready view: off</span> <form method=post action=/ready-view>{field}<input type=hidden name=on value=1>"
+                 f"<button {dis} title=\"A sibling folder showing the files of this folder that are completely in the cache, archives "
+                 f"(zip, 7z, rar) opened as folders: browsing it never downloads anything. Restarts the service.\">Turn on ready view"
+                 f"</button></form>")
+    else:
+        name = v["view"]; loc = locations(name, True); files = lists.get(route, [])
+        arch = sum(1 for f in files if f.lower().endswith(ARCHIVE_EXT))
+        ready = (f"<span class=mut>Ready view:</span> <b>{html.escape(name)}</b> "
+                 f"<span class=mut>· {len(files)} complete file(s), {arch} archive(s) · <a href=\"{html.escape(loc['smb_url'] or '')}\">open</a> · "
+                 f"<a href=# data-copy=\"{html.escape(loc['unc_path'] or '', quote=True)}\">copy \\\\ path</a></span> "
+                 f"<form method=post action=/ready-view class=ask data-field=name data-current=\"{html.escape(name, quote=True)}\" "
+                 f"title=\"New name for the ready view (it must not be the name of a folder or of another view):\">{field}"
+                 f"<input type=hidden name=on value=1><button type=button class=askopen {dis}>Rename view</button></form> "
+                 f"<form method=post action=/ready-view>{field}<input type=hidden name=on value=0>"
+                 f"<button class=danger {dis} data-confirm=\"Turn off the ready view {html.escape(name, quote=True)}? (restarts the service; the cache is kept)\">Turn off</button></form>")
+    n = sum(1 for x in load_sources() if x["route"] == route)
+    acts = (f"<span class=mut>Whole folder:</span> "
+            f"<form method=post action=/folder-erase>{field}<button class=danger {dis} data-confirm=\"Erase the cached data of all "
+            f"{n} torrent(s) of {r}? They stay in the share. (restarts the service)\">Erase its cache</button></form> "
+            f"<form method=post action=/folder-remove>{field}<input type=hidden name=erase value=1><button class=danger {dis} "
+            f"data-confirm=\"Remove the folder {r}: its {n} torrent(s) and their cached data? (restarts the service)\">Remove folder</button></form> "
+            f"<form method=post action=/folder-remove>{field}<input type=hidden name=erase value=0><button {dis} "
+            f"data-confirm=\"Remove the folder {r} ({n} torrent(s)) and keep their cached data? (restarts the service)\">Remove, keep data</button></form>")
+    return f"<div>{vis}</div><div style=\"margin-top:4px\">{ready}</div><div style=\"margin-top:4px\">{acts}</div>"
 
 
 def ask_form(field, value, dis, label, question, current):
@@ -1108,7 +1169,7 @@ def render(s=None):
                      f"<div class=tree>{body}{more}</div></details></td></tr>")
     if not rows:
         rows = "<tr><td colspan=4 class=mut>Nothing cached.</td></tr>"
-    av_settings = load_archive_view_settings(); av_lists = _written_views.get("lists") or {}
+    av_settings = load_folder_settings(); av_lists = _written.get("lists") or {}
     folders = {}
     for x in s["sources"]:
         folders.setdefault(x["route"], []).append(x)
@@ -1136,7 +1197,7 @@ def render(s=None):
                       f"<button {dis} name=erase value=0 data-confirm=\"Remove this torrent and keep its local data?\">Remove, keep data</button></form></td></tr>")
         srows += (f"<tr><td><b>{html.escape(route)}</b> <a href=# class=browse data-f=\"{html.escape(route, quote=True)}\">browse</a> {ask_form('route', route, dis, 'Rename', 'New name for this folder (an existing folder name merges the two; later torrents of the old name follow):', route)}</td><td>{label}</td><td class=n>{mb(sum(x['size'] for x in xs))}</td>"
                   f"<td>{html.escape(status)}</td></tr>"
-                  f"<tr><td colspan=4 style=\"padding-top:0\" class=small>{archive_view_cell(route, dis, av_settings, av_lists)}</td></tr>"
+                  f"<tr><td colspan=4 style=\"padding-top:0\" class=small>{folder_settings_cell(route, dis, av_settings, av_lists)}</td></tr>"
                   f"<tr><td colspan=4 style=\"padding-top:0\"><details data-k=\"src/{html.escape(route, quote=True)}\"><summary class=\"mut small\">"
                   f"{len(xs)} torrent{'s' if len(xs) > 1 else ''}</summary><table>{inner}</table>"
                   + (f"<div class=\"mut small\">… and {len(xs) - 200} more (the full list is in <a href=/api>/api</a>)</div>" if len(xs) > 200 else "")
@@ -1144,7 +1205,13 @@ def render(s=None):
     if not srows:
         srows = "<tr><td colspan=4 class=mut>No torrent yet: add one above.</td></tr>"
     msg = f"<div class=msg>{html.escape(s['message'])}</div>" if s["message"] else ""
-    msg += "".join(f"<div class=\"msg warn\">Security: {html.escape(w)}</div>" for w in WARNINGS)
+    secwarn = ""
+    if WARNINGS:   # a badge in the header that unfolds, not a banner on every page
+        items = "".join(f"<li>{html.escape(w)}</li>" for w in WARNINGS)
+        secwarn = (f"<details class=sec><summary class=\"pill busy\">&#9888; {len(WARNINGS)} security warning"
+                   f"{'s' if len(WARNINGS) > 1 else ''}</summary><div class=secbox><ul>{items}</ul>"
+                   f"<div class=\"mut small\">Set in <code>.env</code>, then <code>sh scripts/up.sh</code>. See the Security "
+                   f"section of the README.</div></div></details>")
     capmb = s["capacity"] or 0
     cap = f"of a {mb(capmb * 1e6)} limit" if capmb else ""
     pct = min(100, round(s["total_cache"] / (capmb * 1e6) * 100, 1)) if capmb else 0
@@ -1195,7 +1262,8 @@ def render(s=None):
     diskpie = (donut([(other, "var(--mut)"), (s["total_cache"], "var(--acc)"), (s["disk_free"], "var(--chip)")],
                      f"other data {mb(other)} · cache {mb(s['total_cache'])} · free {mb(s['disk_free'])}")
                + "") if s["disk_total"] else ""
-    return PAGE.format(capform=capform, act=act, cachepie=cachepie, diskpie=diskpie, down=rate(a["down"]), up=rate(a["up"]), dfree=mb(s["disk_free"]), dtotal=mb(s["disk_total"]), dmax=mb(s["max_cap_mb"] * 1e6),
+    return PAGE.format(capform=capform, act=act, cachepie=cachepie, diskpie=diskpie, secwarn=secwarn,
+                       ncached=sum(1 for i in s["items"] if i["cache"]), down=rate(a["down"]), up=rate(a["up"]), dfree=mb(s["disk_free"]), dtotal=mb(s["disk_total"]), dmax=mb(s["max_cap_mb"] * 1e6),
                        state=html.escape(s["state"]), pillcls="ok" if s["state"] == "running" else "busy",
                        cache=mb(s["total_cache"]), cap=cap, cachepct=pct, msg=msg, rows=rows, sources=srows, unknown=unk,
                        dis=dis, rx=mb(s["network_rx"]), tx=mb(s["network_tx"]), ntor=len(s["sources"]), nfold=len(folders),
@@ -1219,6 +1287,8 @@ def locations(path, is_dir=False):
     """Where a share path is found from a client: smb:// URL (macOS Finder, Linux) and UNC path (Windows)."""
     h = smb_host()
     p = path.strip("/")
+    if p.split("/", 1)[0] in hidden_folders:   # hidden from the share: no address a client could open
+        return {"share_path": p + ("/" if is_dir and p else ""), "smb_url": None, "unc_path": None, "hidden": True}
     return {"share_path": p + ("/" if is_dir and p else ""),
             "smb_url": f"smb://{h}/{SMB_SHARE}/" + urllib.parse.quote(p) + ("/" if is_dir and p else ""),
             "unc_path": f"\\\\{h}\\{SMB_SHARE}\\" + p.replace("/", "\\")}
@@ -1354,13 +1424,22 @@ def erase_targets(path="", hash_=""):
     return out
 
 
+def cached_pieces_of(hashes):
+    """Cache file names (piece hashes) belonging to any of these torrents, found from the cached pieces: cheap even for
+    torrents of hundreds of thousands of pieces, where listing every piece of the torrent is not."""
+    hs = set(hashes)
+    return {h for h, owners in piece_owners(cache_files()).items() if any(ih in hs for ih, _ in owners)}
+
+
 def erase_many(targets):
-    """Erase several (torrent, path) targets with one restart."""
+    """Erase several (torrent, path) targets with one restart. Whole torrents (path '') go through the cached pieces."""
     tp = torrent_pieces()
 
     def job():
-        wanted, kept = set(), 0
+        wanted, kept = cached_pieces_of({ih for ih, p in targets if not p}), 0
         for ih, p in targets:
+            if not p:
+                continue
             w, k = pieces_to_erase(tp[ih], p)
             wanted |= w; kept += k
         n, sz = delete_pieces(wanted)
@@ -1380,9 +1459,13 @@ API_DOC = [
     ("GET", "/api/usage", "by (file, folder or torrent), depth (folder levels, default 3), folder (only under this share path), limit, offset",
      "What takes the most room in the cache, largest first."),
     ("GET", "/api/activity", "", "Rates per torrent, files that received data in the last 30 s, prefetch queue."),
-    ("GET", "/api/archive-views", "", "Per folder: archive view on or off, its name, how many complete archives it shows, its location."),
-    ("POST", "/api/archive-views", "folder, on (true or false), name (optional)",
-     "Turn a folder's archive view on or off: a sibling folder showing the archives (zip, 7z, rar) that are completely in the cache, opened as folders. Restarts the service."),
+    ("GET", "/api/folders", "", "Per folder: hidden from the share or not, ready view on or off, its name and location, how many complete files and archives it shows."),
+    ("POST", "/api/ready-view", "folder, on (true or false), name (optional)",
+     "Turn a folder's ready view on or off: a sibling folder showing the files that are completely in the cache, archives (zip, 7z, rar) opened as folders. Browsing it never downloads. Restarts the service."),
+    ("POST", "/api/folder-remove", "folder, erase (true by default: also erase the cached data; false keeps it)",
+     "Remove every torrent of a folder, with one restart. To erase a folder's cached data and keep its torrents: POST /api/erase with path=<folder>."),
+    ("POST", "/api/folder-visibility", "folder, hidden (true or false)",
+     "Hide a folder from the share or show it again (Samba only, a few seconds, no restart). A hidden folder stays in the catalogue; with its ready view on, the share shows only what is ready."),
     ("GET", "/api", "", "Full status as used by the page (sources, cache tree, settings)."),
     ("POST", "/api/prefetch", "path (repeatable) or q (a search)", "Read files into the cache ahead of time. Refused when larger than 90 % of the cache cap."),
     ("POST", "/api/prefetch/cancel", "", "Empty the prefetch queue and stop the reads in progress."),
@@ -1484,8 +1567,8 @@ class H(http.server.BaseHTTPRequestHandler):
                 res = api_file(one("path"))
             elif u.path == "/api/usage":
                 res = usage(one("by", "file"), one("limit", "50"), one("offset", "0"), one("depth", "3"), one("folder"))
-            elif u.path == "/api/archive-views":
-                res = archive_views_status()
+            elif u.path == "/api/folders":
+                res = folder_settings_status()
             elif u.path == "/api/openapi.json":
                 res = api_openapi()
             elif u.path == "/api/docs":
@@ -1507,11 +1590,21 @@ class H(http.server.BaseHTTPRequestHandler):
             self.send_response(413); self.send_header("Content-Length", "0"); self.end_headers(); return
         raw = self.rfile.read(n)
         go = lambda fn, *a: threading.Thread(target=fn, args=a, daemon=True).start()
-        if self.path in ("/api/prefetch", "/api/prefetch/cancel", "/api/erase", "/api/archive-views"):
+        if self.path in ("/api/prefetch", "/api/prefetch/cancel", "/api/erase", "/api/ready-view", "/api/folder-visibility",
+                         "/api/folder-remove"):
             q = body_params(raw, self.headers.get("Content-Type"))
             one = lambda k: str((q.get(k) or [""])[0])
-            if self.path == "/api/archive-views":
-                res = set_archive_view(one("folder"), one("on").lower() in ("1", "true", "on", "yes"), one("name"))
+            yes = lambda k: one(k).lower() in ("1", "true", "on", "yes")
+            if self.path == "/api/ready-view":
+                res = set_ready_view(one("folder"), yes("on"), one("name"))
+            elif self.path == "/api/folder-visibility":
+                res = set_hidden(one("folder"), yes("hidden"))
+            elif self.path == "/api/folder-remove":
+                if not any(x["route"] == one("folder") for x in load_sources()):
+                    res = {"error": "unknown folder"}
+                else:
+                    go(remove_folder, one("folder"), one("erase").lower() not in ("0", "false", "no", "off"))
+                    res = {"removing": one("folder"), "note": "the service restarts; see /api/status for the result"}
             elif self.path == "/api/erase":
                 h = one("hash").lower()
                 targets = erase_targets(one("path"), h if re.fullmatch(r"[0-9a-f]{40}", h) else "")
@@ -1542,8 +1635,20 @@ class H(http.server.BaseHTTPRequestHandler):
                 go(add_links, one("link"), one("route"))
             elif self.path == "/rename" and one("new") and (one("route") or re.fullmatch(r"[0-9a-f]{8}", one("id"))):
                 go(rename, one("new"), one("route"), one("id") if not one("route") else "")
-            elif self.path == "/archive-view" and one("folder"):
-                res = set_archive_view(one("folder"), one("on") == "1", one("name"))
+            elif self.path == "/ready-view" and one("folder"):
+                res = set_ready_view(one("folder"), one("on") == "1", one("name"))
+                if res.get("error"):
+                    state["message"] = res["error"]
+            elif self.path == "/folder-erase" and one("folder"):
+                targets = erase_targets(one("folder"))
+                if targets:
+                    go(erase_many, targets)
+                else:
+                    state["message"] = "nothing cached to erase there"
+            elif self.path == "/folder-remove" and one("folder"):
+                go(remove_folder, one("folder"), one("erase") != "0")
+            elif self.path == "/folder-visibility" and one("folder"):
+                res = set_hidden(one("folder"), one("hidden") == "1")
                 if res.get("error"):
                     state["message"] = res["error"]
             elif self.path == "/remove" and re.fullmatch(r"[0-9a-f]{8}", one("id")):
@@ -1903,32 +2008,54 @@ def prefetch_view():
 
 
 
-# ---------------------------------------------------------------- archive views: complete archives shown as folders
+# ---------------------------------------------------------------- per folder: ready view, visibility in the share
 
-ARCHIVE_VIEW_SETTINGS = "/data/archive_view_settings.json"   # {folder: {"name": view name}}: folders with a view
-ARCHIVE_VIEWS = os.environ.get("DISTRIBYTED_ARCHIVE_VIEWS", "/data/archive-views.json")   # the list Distribyted reads
-ARCHIVE_EXT = (".zip", ".7z", ".rar")
+FOLDER_SETTINGS = "/data/folder_settings.json"   # {folder: {"view": ready view name or absent, "hidden": bool}}
+OLD_ARCHIVE_VIEW_SETTINGS = "/data/archive_view_settings.json"   # first prototype, migrated
+READY_VIEWS = os.environ.get("DISTRIBYTED_READY_VIEWS", "/data/ready-views.json")   # the list Distribyted reads
+HIDDEN_FOLDERS = "/data/smb/hidden-folders.txt"   # read by the Samba container: folders hidden from the share
+hidden_folders = set()   # current hidden folders (locations() gives no SMB address for them)
 
 
-def load_archive_view_settings():
+def view_default(folder):
+    return sanitize(f"{folder}_READY")
+
+
+def load_folder_settings():
     try:
-        return json.load(open(ARCHIVE_VIEW_SETTINGS))
+        st = json.load(open(FOLDER_SETTINGS))
     except (OSError, ValueError):
-        return {}
+        st = {}
+        try:   # the prototype's archive views become ready views; the old default name moves to the new default
+            for r, v in json.load(open(OLD_ARCHIVE_VIEW_SETTINGS)).items():
+                name = v.get("name", "")
+                st[r] = {"view": view_default(r) if name == sanitize(f"{r}_ZIP") else name}
+            save_folder_settings(st)
+            os.remove(OLD_ARCHIVE_VIEW_SETTINGS)
+        except (OSError, ValueError):
+            pass
+    hidden_folders.clear(); hidden_folders.update(r for r, v in st.items() if v.get("hidden"))
+    return st
 
 
-def save_archive_view_settings(st):
-    with open(ARCHIVE_VIEW_SETTINGS + ".tmp", "w") as f:
+def save_folder_settings(st):
+    st = {r: v for r, v in st.items() if v.get("view") or v.get("hidden")}
+    with open(FOLDER_SETTINGS + ".tmp", "w") as f:
         json.dump(st, f, indent=1)
-    os.replace(ARCHIVE_VIEW_SETTINGS + ".tmp", ARCHIVE_VIEW_SETTINGS)
+    os.replace(FOLDER_SETTINGS + ".tmp", FOLDER_SETTINGS)
+    hidden_folders.clear(); hidden_folders.update(r for r, v in st.items() if v.get("hidden"))
 
 
-def complete_archives(st=None):
-    """{folder: [archive paths inside the folder]} for the folders with a view: the archives whose every piece is in the
+def ready_views(st=None):
+    st = load_folder_settings() if st is None else st
+    return {r: v["view"] for r, v in st.items() if v.get("view")}
+
+
+def complete_files(views):
+    """{folder: [file paths inside the folder]} for the folders with a ready view: the files whose every piece is in the
     cache. Starts from the cached pieces, so the work follows what is cached, not the size of the catalogue."""
-    st = load_archive_view_settings() if st is None else st
-    out = {r: [] for r in st}
-    if not st:
+    out = {r: [] for r in views}
+    if not views:
         return out
     files = cache_files(); cached = set(files); tp = torrent_pieces(); sources = load_sources()
     flat = flat_folders(tp, sources)
@@ -1937,11 +2064,11 @@ def complete_archives(st=None):
     for h, owners in piece_owners(files).items():
         for ih, i in owners:
             t = tp.get(ih)
-            if t and route_of.get(ih) in st:
+            if t and route_of.get(ih) in views:
                 cand.update((ih, k) for k, _ in files_of_piece(t, i, files[h]))
     for ih, k in cand:
         t = tp[ih]; fp, o, n = t["files"][k]
-        if n <= 0 or not fp.lower().endswith(ARCHIVE_EXT):
+        if n <= 0 or is_padding(fp):
             continue
         pl = t["pl"]
         if all(piece(t, i) in cached for i in range(o // pl, (o + n - 1) // pl + 1)):
@@ -1950,65 +2077,100 @@ def complete_archives(st=None):
     return out
 
 
-_written_views = {"text": None}
+ARCHIVE_EXT = (".zip", ".7z", ".rar")
+_written = {"views": None, "hidden": None, "lists": {}}
 
 
-def write_archive_views():
-    """Write the list of complete archives per view for Distribyted (it rereads it every 30 s); only when it changed."""
-    st = load_archive_view_settings()
-    lists = complete_archives(st)
-    text = json.dumps({"views": [{"name": v["name"], "route": r, "archives": sorted(lists.get(r, []))} for r, v in st.items()]},
+def write_ready_views():
+    """Write the list of complete files per ready view for Distribyted (it rereads it every 30 s); only when it changed."""
+    views = ready_views()
+    lists = complete_files(views)
+    text = json.dumps({"views": [{"name": name, "route": r, "files": sorted(lists.get(r, []))} for r, name in views.items()]},
                       indent=1)
-    if text != _written_views["text"]:
-        with open(ARCHIVE_VIEWS + ".tmp", "w") as f:
+    if text != _written["views"]:
+        with open(READY_VIEWS + ".tmp", "w") as f:
             f.write(text)
-        os.replace(ARCHIVE_VIEWS + ".tmp", ARCHIVE_VIEWS)
-        _written_views["text"] = text
-    _written_views["lists"] = lists
+        os.replace(READY_VIEWS + ".tmp", READY_VIEWS)
+        _written["views"] = text
+    _written["lists"] = lists
     return lists
 
 
-def archive_view_writer():
+def write_hidden_folders():
+    """Folders hidden from the share, one per line, for the Samba container (it reloads its configuration on change).
+    They stay in the mount: search, Cache and the ready view keep working."""
+    load_folder_settings()
+    text = "".join(f"{r}\n" for r in sorted(hidden_folders))
+    if text != _written["hidden"]:
+        os.makedirs(os.path.dirname(HIDDEN_FOLDERS), exist_ok=True)
+        with open(HIDDEN_FOLDERS + ".tmp", "w") as f:
+            f.write(text)
+        os.replace(HIDDEN_FOLDERS + ".tmp", HIDDEN_FOLDERS)
+        _written["hidden"] = text
+
+
+def ready_view_writer():
     while True:
         time.sleep(30)
         try:
-            write_archive_views()
+            write_ready_views()
         except Exception as e:
-            print("archive views:", e)
+            print("ready views:", e)
 
 
-def archive_views_status():
-    st = load_archive_view_settings()
-    lists = complete_archives(st)
+def folder_settings_status():
+    st = load_folder_settings()
+    lists = complete_files(ready_views(st))
     routes = sorted({x["route"] for x in load_sources()})
-    return {"folders": [{"folder": r, "view": r in st, "name": st.get(r, {}).get("name", f"{r}_ZIP"),
-                         "archives": len(lists.get(r, [])), **(locations(st[r]["name"], True) if r in st else {})}
-                        for r in routes]}
+    out = []
+    for r in routes:
+        v = st.get(r, {})
+        files = lists.get(r, [])
+        row = {"folder": r, "hidden": bool(v.get("hidden")), "view": bool(v.get("view")),
+               "view_name": v.get("view") or view_default(r), "complete_files": len(files),
+               "complete_archives": sum(1 for f in files if f.lower().endswith(ARCHIVE_EXT))}
+        if v.get("view"):
+            row["view_location"] = locations(v["view"], True)
+        out.append(row)
+    return {"folders": out}
 
 
-def set_archive_view(folder, on, name=""):
-    """Turn the archive view of a folder on or off; restarts the service (views are created at start-up)."""
+def set_ready_view(folder, on, name=""):
+    """Turn the ready view of a folder on or off; restarts the service (views are created at start-up)."""
     routes = {x["route"] for x in load_sources()}
     if folder not in routes:
         return {"error": "unknown folder"}
-    st = load_archive_view_settings()
+    st = load_folder_settings()
+    cur = st.get(folder, {})
     if not on:
-        if folder not in st:
-            return {"error": "no archive view for that folder"}
-        st.pop(folder)
+        if not cur.get("view"):
+            return {"error": "no ready view for that folder"}
+        cur.pop("view")
     else:
-        n = sanitize(name or st.get(folder, {}).get("name") or f"{folder}_ZIP")
-        taken = routes | {v["name"] for r, v in st.items() if r != folder}
+        n = sanitize(name or cur.get("view") or view_default(folder))
+        taken = routes | {v["view"] for r, v in st.items() if r != folder and v.get("view")}
         if n in taken:
             return {"error": f"the name {n} is already a folder or a view"}
-        st[folder] = {"name": n}
+        cur["view"] = n
+    st[folder] = cur
 
     def job():
-        save_archive_view_settings(st)
-        return f"archive view of {folder}: " + (f"on, as {st[folder]['name']}" if on else "off")
+        save_folder_settings(st)
+        return f"ready view of {folder}: " + (f"on, as {cur['view']}" if on else "off")
     threading.Thread(target=exclusive, args=(job,), daemon=True).start()
     return {"ok": True, "restarting": True}
 
+
+def set_hidden(folder, hidden):
+    """Show or hide a folder in the share (Samba only: no restart, a few seconds)."""
+    if folder not in {x["route"] for x in load_sources()}:
+        return {"error": "unknown folder"}
+    st = load_folder_settings()
+    st.setdefault(folder, {})["hidden"] = bool(hidden)
+    save_folder_settings(st)
+    write_hidden_folders()
+    state["message"] = f"{folder}: {'hidden from' if hidden else 'shown in'} the share"
+    return {"ok": True, "hidden": bool(hidden)}
 
 def activity_view():
     now = time.time()
@@ -2063,7 +2225,7 @@ def main():
     threading.Thread(target=sampler, daemon=True).start()
     threading.Thread(target=indexer, daemon=True).start()
     threading.Thread(target=snapshotter, daemon=True).start()
-    threading.Thread(target=archive_view_writer, daemon=True).start()
+    threading.Thread(target=ready_view_writer, daemon=True).start()
     for _ in range(PREFETCH_WORKERS):
         threading.Thread(target=prefetch_worker, daemon=True).start()
     srv = http.server.ThreadingHTTPServer(("0.0.0.0", 8080), H)

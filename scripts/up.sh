@@ -29,7 +29,7 @@ fi
 ATHENAFS_WARNINGS=${w#|}
 export ATHENAFS_WARNINGS
 [ -z "$w" ] || printf '%s\n' "$w" | tr '|' '\n' | sed '/^$/d; s/^/WARNING: /' >&2
-mkdir -p "$DATA/torrents" "$DATA/state" "$DATA/mount"
+mkdir -p "$DATA/torrents" "$DATA/state" "$DATA/state/smb" "$DATA/mount"
 # mount/fs can be a dead FUSE mount left by a killed run (stat fails: "Transport endpoint is not connected"); the core
 # unmounts it when it starts, and that propagates here
 [ -d "$DATA/mount/fs" ] || mkdir "$DATA/mount/fs" 2>/dev/null || true

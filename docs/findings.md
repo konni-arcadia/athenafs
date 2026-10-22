@@ -426,8 +426,17 @@ Open points (2026-10-22):
     owner's Finder test from a Mac (views, opening zips, Quick Look, copying a file) worked and received 6.3 MB in 2.6 min,
     the background rate of the health checks, with no piece downloaded. Turn on, rename, turn off and the view following
     a folder rename were checked from the page and the API.
-  - Next: the "normal view off" (local library) mode. Hiding a folder from the mount would also hide it from the prefetch
-    reader, which reads through the mount; to design (for example hidden on the Samba side only).
+  - **Ready views and hidden folders (2026-10-22), agreed and built:** the view shows every complete file, not only the
+    archives (otherwise a hidden folder's complete disc images or manuals would vanish from the share); default name
+    `<folder>_READY` (the prototype's `_ZIP` setting migrated). "Normal view: hidden" is applied by Samba only: the
+    supervisor writes `/data/smb/hidden-folders.txt`, the Samba entrypoint rebuilds its `veto files` line (the static
+    preview/index list plus those names) and runs `smbcontrol smbd reload-config` within 3 s; the folder stays in the mount,
+    so search, Cache (which reads through the mount) and its ready view keep working, and the API gives its items no SMB
+    address. Checked with `librivox` (entirely cached: m4b, xml, gz and one zip): its ready view showed 34 files, the zip as a
+    folder and the rest as they are; hidden, the share root listed `librivox_READY` but not `librivox`, opening the folder or
+    a file in it failed (`NT_STATUS_OBJECT_NAME_NOT_FOUND`, `NT_STATUS_OBJECT_PATH_NOT_FOUND`), Cache still read a file of
+    it, and "Show in the share" from the page brought it back within seconds. Known quirk: Samba hides by name, so a
+    sub-folder anywhere with exactly the hidden folder's name is hidden too.
   - Later, only if needed: an archive view as a separate SMB share with its own account. The share name itself is already
     a setting (`SMB_SHARE`).
 - **Not wanted yet:** pinning files in the cache (protecting them from eviction).

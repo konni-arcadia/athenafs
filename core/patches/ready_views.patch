@@ -1,20 +1,20 @@
 diff --git a/cmd/distribyted/main.go b/cmd/distribyted/main.go
-index 78d8974..0cbdd1d 100644
+index 78d8974..79ff678 100644
 --- a/cmd/distribyted/main.go
 +++ b/cmd/distribyted/main.go
 @@ -199,6 +199,7 @@ func load(configPath string, port, webDAVPort int, fuseAllowOther bool) error {
  	if err != nil {
  		return fmt.Errorf("error when loading torrents: %w", err)
  	}
-+	fss = fs.AddArchiveViews(fss) // archive views ($DISTRIBYTED_ARCHIVE_VIEWS): complete archives shown as folders
++	fss = fs.AddArchiveViews(fss) // ready views ($DISTRIBYTED_READY_VIEWS): complete files, archives opened as folders
  
  	go func() {
  		if mh == nil {
-diff --git a/fs/archive_view.go b/fs/archive_view.go
+diff --git a/fs/ready_views.go b/fs/ready_views.go
 new file mode 100644
-index 0000000..aba0086
+index 0000000..08f29c0
 --- /dev/null
-+++ b/fs/archive_view.go
++++ b/fs/ready_views.go
 @@ -0,0 +1,174 @@
 +package fs
 +
@@ -30,17 +30,17 @@ index 0000000..aba0086
 +	"github.com/rs/zerolog/log"
 +)
 +
-+// Archive views: extra folders at the root of the mount that show archives (zip, 7z, rar) of a route as folders, but
-+// only the archives listed in $DISTRIBYTED_ARCHIVE_VIEWS. The supervisor lists there the archives that are completely in
-+// the cache, so nothing a view shows can trigger a download, whatever a file browser enumerates. The list is reread
-+// every 30 s; the views themselves (their names) are fixed at start-up.
++// Ready views: extra folders at the root of the mount that show the files of a route listed in $DISTRIBYTED_READY_VIEWS,
++// archives (zip, 7z, rar) opened as folders and other files as they are. The supervisor lists there the files that are
++// completely in the cache, so nothing a view shows can trigger a download, whatever a file browser enumerates. The list
++// is reread every 30 s; the views themselves (their names) are fixed at start-up.
 +//
-+// File format: {"views": [{"name": "Folder_ZIP", "route": "Folder", "archives": ["path/in/route/a.zip", ...]}]}
++// File format: {"views": [{"name": "Folder_READY", "route": "Folder", "files": ["path/in/route/a.zip", ...]}]}
 +
 +type archiveViewConf struct {
 +	Name     string   `json:"name"`
 +	Route    string   `json:"route"`
-+	Archives []string `json:"archives"`
++	Files    []string `json:"files"`
 +}
 +
 +func readArchiveViews(file string) []archiveViewConf {
@@ -59,7 +59,7 @@ index 0000000..aba0086
 +
 +// AddArchiveViews adds one filesystem per configured view to fss (keys are "/name", like routes).
 +func AddArchiveViews(fss map[string]Filesystem) map[string]Filesystem {
-+	file := os.Getenv("DISTRIBYTED_ARCHIVE_VIEWS")
++	file := os.Getenv("DISTRIBYTED_READY_VIEWS")
 +	if file == "" {
 +		return fss
 +	}
@@ -67,7 +67,7 @@ index 0000000..aba0086
 +		src, ok := fss[path.Join("/", c.Route)]
 +		key := path.Join("/", c.Name)
 +		if !ok || c.Name == "" || fss[key] != nil {
-+			log.Warn().Str("view", c.Name).Str("route", c.Route).Msg("archive view skipped (unknown route or name taken)")
++			log.Warn().Str("view", c.Name).Str("route", c.Route).Msg("ready view skipped (unknown route or name taken)")
 +			continue
 +		}
 +		v := &ArchiveView{name: c.Name, route: c.Route, src: src, file: file, s: newStorage(nil)}
@@ -108,7 +108,7 @@ index 0000000..aba0086
 +	var list []string
 +	for _, c := range readArchiveViews(v.file) {
 +		if c.Name == v.name {
-+			list = append(list, c.Archives...)
++			list = append(list, c.Files...)
 +		}
 +	}
 +	sort.Strings(list)
@@ -124,16 +124,16 @@ index 0000000..aba0086
 +	n, want := 0, 0
 +	for _, rel := range list {
 +		p := path.Join("/", rel)
-+		l := archiveLoader(p)
-+		if l == nil {
-+			continue
-+		}
 +		want++
 +		f, err := v.src.Open(p)
 +		if err != nil || f.IsDir() {
 +			continue
 +		}
-+		if s.AddFS(NewArchive(&idleCloser{f: f}, f.Size(), l), p) == nil {
++		if l := archiveLoader(p); l != nil { // an archive: a folder of its files
++			if s.AddFS(NewArchive(&idleCloser{f: f}, f.Size(), l), p) == nil {
++				n++
++			}
++		} else if s.Add(f, p) == nil { // any other file: as it is
 +			n++
 +		}
 +	}
@@ -145,7 +145,7 @@ index 0000000..aba0086
 +	v.mu.Lock()
 +	v.s, v.current = s, key
 +	v.mu.Unlock()
-+	log.Info().Str("view", v.name).Int("archives", n).Int("listed", want).Msg("archive view updated")
++	log.Info().Str("view", v.name).Int("files", n).Int("listed", want).Msg("ready view updated")
 +}
 +
 +func (v *ArchiveView) Open(filename string) (File, error) {

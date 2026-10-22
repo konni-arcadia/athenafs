@@ -10,11 +10,19 @@ with `.env.example`, then `sh scripts/up.sh` (it rebuilds).
 ## [Unreleased]
 
 ### Added
-- Archive views: per folder, a sibling folder showing its archives (zip, 7z, rar) that are completely in the cache, opened
-  as folders, so browsing them never downloads anything. Set on the page (Folders: turn on, rename, turn off) or with
-  `/api/archive-views`; renaming a folder renames its view unless the view's name was customised. Distribyted patches:
-  `archive_views` (the views, rebuilt when the list of complete archives changes, every 30 s) and `fs_indexed_lookup`
-  (lookups walk up the path instead of scanning every mounted filesystem).
+- Ready views: per folder, a sibling folder (`<folder>_READY`) showing its files that are completely in the cache,
+  archives (zip, 7z, rar) opened as folders and other files as they are, so browsing it never downloads anything. Set on
+  the page (Folders: turn on, rename, turn off) or with `POST /api/ready-view`; renaming a folder renames its view unless
+  the view's name was customised. Distribyted patches: `ready_views` (the views, rebuilt when the list of complete files
+  changes, every 30 s) and `fs_indexed_lookup` (lookups walk up the path instead of scanning every mounted filesystem).
+  The first prototype's "archive views" (archives only, `_ZIP`) are migrated.
+- Hide a folder from the share (page, or `POST /api/folder-visibility`): Samba neither lists nor opens it, within seconds
+  and without a restart; it stays in the mount, so search, Cache and its ready view keep working. With its ready view on,
+  the share shows only what is ready ("local library"). Settings: `/data/folder_settings.json`.
+- Whole-folder actions on the page: erase its cache, remove the folder with or without its cached data (one restart);
+  `POST /api/folder-remove`. Erasing whole torrents goes through the cached pieces (fast on torrents of hundreds of
+  thousands of pieces).
+- Page: security warnings as a header badge that unfolds; the Cache section folded by default; rates below 1 kB/s in B/s.
 - Page: cache and disk donuts, rate histogram over 10 minutes with a scale, "Largest in the cache" folded at the bottom.
 - Reproducible builds: base images pinned by digest (`golang:1.24-alpine`, `alpine:3`, `debian:trixie-slim`) and
   Distribyted fetched by commit (`58d471c`, tag v0.15.0) instead of by tag. Alpine and Debian packages installed during the
