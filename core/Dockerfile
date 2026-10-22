@@ -62,6 +62,15 @@ RUN git apply /tmp/dormant_torrents.patch
 # A torrent that wants no data seldom connects to peers: the peers known (announced on the DHT and trackers) are the signal.
 COPY patches/health_check.patch /tmp/health_check.patch
 RUN git apply /tmp/health_check.patch
+# Local patch: a path was resolved by scanning every mounted filesystem (a route, an archive): the cost of each lookup
+# grew with their number, and with Distribyted's archive mode on 447,000 files the share root never answered. Lookups now
+# walk up the path's parents instead (a few map lookups).
+COPY patches/fs_indexed_lookup.patch /tmp/fs_indexed_lookup.patch
+RUN git apply /tmp/fs_indexed_lookup.patch
+# Local patch: archive views ($DISTRIBYTED_ARCHIVE_VIEWS, written by admin.py): extra folders at the root of the mount
+# showing the archives of a route as folders, only those listed (the ones completely in the cache), reread every 30 s.
+COPY patches/archive_views.patch /tmp/archive_views.patch
+RUN git apply /tmp/archive_views.patch
 # Local patch: files of $DISTRIBYTED_ROOT_FILES are served at the root of the mount (admin.py puts links to its page there).
 COPY patches/root_files.go /src/fs/root_files.go
 RUN sed -i 's|\treturn &ContainerFs{s: s}, nil|\taddRootFiles(s)\n\treturn \&ContainerFs{s: s}, nil|' fs/container.go \

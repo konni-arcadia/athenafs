@@ -258,6 +258,15 @@ def rename(new, route="", sid=""):
             if s["id"] in ids:
                 s["route"] = new
         save_sources(cur)
+        if route:   # its archive view follows (its name too, unless it was customised)
+            av = load_archive_view_settings()
+            if old in av and not any(s["route"] == old for s in cur):
+                v = av.pop(old)
+                if v["name"] == f"{old}_ZIP":
+                    v["name"] = sanitize(f"{new}_ZIP")
+                if new not in av:
+                    av[new] = v
+                save_archive_view_settings(av)
         if route:   # a whole folder: later adds of the old name follow
             a = {k: (new if v == old else v) for k, v in load_aliases().items()}
             a[old] = new
@@ -453,6 +462,10 @@ def start():
         write_health_order()
     except OSError as e:
         print("health order:", e)
+    try:
+        write_archive_views()   # the views (their names) are created by Distribyted at start-up
+    except Exception as e:
+        print("archive views:", e)
     generate_config(load_sources())
     state["proc"] = subprocess.Popen(["/bin/distribyted", "--config", GENERATED, "--http-port", "4444"])
     state["state"] = "running"
@@ -958,8 +971,9 @@ document.addEventListener('click',e=>{{
   else if(t.classList.contains('cache'))cache({{path:t.dataset.p}});
   else if(t.classList.contains('askopen')){{  // Rename / Move: a name field in place
     const f=t.closest('form'); f.dataset.armed=1; t.remove();
-    f.insertAdjacentHTML('beforeend','<input type=text name=new required style="width:200px" value="'+esc(f.dataset.current)+'"> <button>OK</button> <button type=button class=askcancel>Cancel</button><div class="mut small">'+esc(f.title)+'</div>');
-    const i=f.querySelector('input[name=new]'); i.focus(); i.select();
+    const fld=f.dataset.field||'new';
+    f.insertAdjacentHTML('beforeend','<input type=text name="'+fld+'" required style="width:200px" value="'+esc(f.dataset.current)+'"> <button>OK</button> <button type=button class=askcancel>Cancel</button><div class="mut small">'+esc(f.title)+'</div>');
+    const i=f.querySelector('input[name="'+fld+'"]'); i.focus(); i.select();
   }}
   else if(t.classList.contains('askcancel')){{const f=t.closest('form');delete f.dataset.armed;location.reload()}}
   else if(t.dataset.uerase!==undefined){{
@@ -1049,6 +1063,25 @@ def histogram_svg():
             f"<i style=\"background:var(--acc)\"></i>download<i style=\"background:var(--warn)\"></i>upload</div>")
 
 
+def archive_view_cell(route, dis, st, lists):
+    """Folder row: its archive view (complete archives shown as folders in a sibling folder), with on/off and rename."""
+    r = html.escape(route, quote=True)
+    hidden = f"<input type=hidden name=folder value=\"{r}\">"
+    if route not in st:
+        return (f"<span class=mut>Archive view: off</span> <form method=post action=/archive-view>{hidden}<input type=hidden name=on value=1>"
+                f"<button {dis} title=\"A sibling folder showing the archives (zip, 7z, rar) of this folder that are completely in the "
+                f"cache, opened as folders: browsing it never downloads anything. Restarts the service.\">Turn on archive view</button></form>")
+    name = st[route]["name"]; loc = locations(name, True)
+    return (f"<span class=mut>Archive view:</span> <b>{html.escape(name)}</b> "
+            f"<span class=mut>· {len(lists.get(route, []))} complete archive(s) · <a href=\"{html.escape(loc['smb_url'])}\">open</a> · "
+            f"<a href=# data-copy=\"{html.escape(loc['unc_path'], quote=True)}\">copy \\\\ path</a></span> "
+            f"<form method=post action=/archive-view class=ask data-field=name data-current=\"{html.escape(name, quote=True)}\" "
+            f"title=\"New name for the archive view (it must not be the name of a folder or of another view):\">{hidden}"
+            f"<input type=hidden name=on value=1><button type=button class=askopen {dis}>Rename view</button></form> "
+            f"<form method=post action=/archive-view>{hidden}<input type=hidden name=on value=0>"
+            f"<button class=danger {dis} data-confirm=\"Turn off the archive view {html.escape(name, quote=True)}? (restarts the service; the cache is kept)\">Turn off</button></form>")
+
+
 def ask_form(field, value, dis, label, question, current):
     """A button that opens a name field in place (no prompt() pop-up: blocked silently in embedded browsers), then
     posts the name to /rename."""
@@ -1075,6 +1108,7 @@ def render(s=None):
                      f"<div class=tree>{body}{more}</div></details></td></tr>")
     if not rows:
         rows = "<tr><td colspan=4 class=mut>Nothing cached.</td></tr>"
+    av_settings = load_archive_view_settings(); av_lists = _written_views.get("lists") or {}
     folders = {}
     for x in s["sources"]:
         folders.setdefault(x["route"], []).append(x)
@@ -1102,6 +1136,7 @@ def render(s=None):
                       f"<button {dis} name=erase value=0 data-confirm=\"Remove this torrent and keep its local data?\">Remove, keep data</button></form></td></tr>")
         srows += (f"<tr><td><b>{html.escape(route)}</b> <a href=# class=browse data-f=\"{html.escape(route, quote=True)}\">browse</a> {ask_form('route', route, dis, 'Rename', 'New name for this folder (an existing folder name merges the two; later torrents of the old name follow):', route)}</td><td>{label}</td><td class=n>{mb(sum(x['size'] for x in xs))}</td>"
                   f"<td>{html.escape(status)}</td></tr>"
+                  f"<tr><td colspan=4 style=\"padding-top:0\" class=small>{archive_view_cell(route, dis, av_settings, av_lists)}</td></tr>"
                   f"<tr><td colspan=4 style=\"padding-top:0\"><details data-k=\"src/{html.escape(route, quote=True)}\"><summary class=\"mut small\">"
                   f"{len(xs)} torrent{'s' if len(xs) > 1 else ''}</summary><table>{inner}</table>"
                   + (f"<div class=\"mut small\">… and {len(xs) - 200} more (the full list is in <a href=/api>/api</a>)</div>" if len(xs) > 200 else "")
@@ -1345,6 +1380,9 @@ API_DOC = [
     ("GET", "/api/usage", "by (file, folder or torrent), depth (folder levels, default 3), folder (only under this share path), limit, offset",
      "What takes the most room in the cache, largest first."),
     ("GET", "/api/activity", "", "Rates per torrent, files that received data in the last 30 s, prefetch queue."),
+    ("GET", "/api/archive-views", "", "Per folder: archive view on or off, its name, how many complete archives it shows, its location."),
+    ("POST", "/api/archive-views", "folder, on (true or false), name (optional)",
+     "Turn a folder's archive view on or off: a sibling folder showing the archives (zip, 7z, rar) that are completely in the cache, opened as folders. Restarts the service."),
     ("GET", "/api", "", "Full status as used by the page (sources, cache tree, settings)."),
     ("POST", "/api/prefetch", "path (repeatable) or q (a search)", "Read files into the cache ahead of time. Refused when larger than 90 % of the cache cap."),
     ("POST", "/api/prefetch/cancel", "", "Empty the prefetch queue and stop the reads in progress."),
@@ -1446,6 +1484,8 @@ class H(http.server.BaseHTTPRequestHandler):
                 res = api_file(one("path"))
             elif u.path == "/api/usage":
                 res = usage(one("by", "file"), one("limit", "50"), one("offset", "0"), one("depth", "3"), one("folder"))
+            elif u.path == "/api/archive-views":
+                res = archive_views_status()
             elif u.path == "/api/openapi.json":
                 res = api_openapi()
             elif u.path == "/api/docs":
@@ -1467,10 +1507,12 @@ class H(http.server.BaseHTTPRequestHandler):
             self.send_response(413); self.send_header("Content-Length", "0"); self.end_headers(); return
         raw = self.rfile.read(n)
         go = lambda fn, *a: threading.Thread(target=fn, args=a, daemon=True).start()
-        if self.path in ("/api/prefetch", "/api/prefetch/cancel", "/api/erase"):
+        if self.path in ("/api/prefetch", "/api/prefetch/cancel", "/api/erase", "/api/archive-views"):
             q = body_params(raw, self.headers.get("Content-Type"))
             one = lambda k: str((q.get(k) or [""])[0])
-            if self.path == "/api/erase":
+            if self.path == "/api/archive-views":
+                res = set_archive_view(one("folder"), one("on").lower() in ("1", "true", "on", "yes"), one("name"))
+            elif self.path == "/api/erase":
                 h = one("hash").lower()
                 targets = erase_targets(one("path"), h if re.fullmatch(r"[0-9a-f]{40}", h) else "")
                 if targets and state["state"] == "running":
@@ -1500,6 +1542,10 @@ class H(http.server.BaseHTTPRequestHandler):
                 go(add_links, one("link"), one("route"))
             elif self.path == "/rename" and one("new") and (one("route") or re.fullmatch(r"[0-9a-f]{8}", one("id"))):
                 go(rename, one("new"), one("route"), one("id") if not one("route") else "")
+            elif self.path == "/archive-view" and one("folder"):
+                res = set_archive_view(one("folder"), one("on") == "1", one("name"))
+                if res.get("error"):
+                    state["message"] = res["error"]
             elif self.path == "/remove" and re.fullmatch(r"[0-9a-f]{8}", one("id")):
                 go(remove_source, one("id"), one("erase") != "0")
         self.send_response(303); self.send_header("Location", "/"); self.end_headers()
@@ -1856,6 +1902,114 @@ def prefetch_view():
                 "done": prefetch["done"], "failed": list(prefetch["failed"]), "bytes_read": prefetch["bytes"]}
 
 
+
+# ---------------------------------------------------------------- archive views: complete archives shown as folders
+
+ARCHIVE_VIEW_SETTINGS = "/data/archive_view_settings.json"   # {folder: {"name": view name}}: folders with a view
+ARCHIVE_VIEWS = os.environ.get("DISTRIBYTED_ARCHIVE_VIEWS", "/data/archive-views.json")   # the list Distribyted reads
+ARCHIVE_EXT = (".zip", ".7z", ".rar")
+
+
+def load_archive_view_settings():
+    try:
+        return json.load(open(ARCHIVE_VIEW_SETTINGS))
+    except (OSError, ValueError):
+        return {}
+
+
+def save_archive_view_settings(st):
+    with open(ARCHIVE_VIEW_SETTINGS + ".tmp", "w") as f:
+        json.dump(st, f, indent=1)
+    os.replace(ARCHIVE_VIEW_SETTINGS + ".tmp", ARCHIVE_VIEW_SETTINGS)
+
+
+def complete_archives(st=None):
+    """{folder: [archive paths inside the folder]} for the folders with a view: the archives whose every piece is in the
+    cache. Starts from the cached pieces, so the work follows what is cached, not the size of the catalogue."""
+    st = load_archive_view_settings() if st is None else st
+    out = {r: [] for r in st}
+    if not st:
+        return out
+    files = cache_files(); cached = set(files); tp = torrent_pieces(); sources = load_sources()
+    flat = flat_folders(tp, sources)
+    route_of = {source_hash(x): x["route"] for x in sources}
+    cand = set()
+    for h, owners in piece_owners(files).items():
+        for ih, i in owners:
+            t = tp.get(ih)
+            if t and route_of.get(ih) in st:
+                cand.update((ih, k) for k, _ in files_of_piece(t, i, files[h]))
+    for ih, k in cand:
+        t = tp[ih]; fp, o, n = t["files"][k]
+        if n <= 0 or not fp.lower().endswith(ARCHIVE_EXT):
+            continue
+        pl = t["pl"]
+        if all(piece(t, i) in cached for i in range(o // pl, (o + n - 1) // pl + 1)):
+            r = route_of[ih]
+            out[r].append(share_path(r, t, fp, flat.get(r))[len(r) + 1:])
+    return out
+
+
+_written_views = {"text": None}
+
+
+def write_archive_views():
+    """Write the list of complete archives per view for Distribyted (it rereads it every 30 s); only when it changed."""
+    st = load_archive_view_settings()
+    lists = complete_archives(st)
+    text = json.dumps({"views": [{"name": v["name"], "route": r, "archives": sorted(lists.get(r, []))} for r, v in st.items()]},
+                      indent=1)
+    if text != _written_views["text"]:
+        with open(ARCHIVE_VIEWS + ".tmp", "w") as f:
+            f.write(text)
+        os.replace(ARCHIVE_VIEWS + ".tmp", ARCHIVE_VIEWS)
+        _written_views["text"] = text
+    _written_views["lists"] = lists
+    return lists
+
+
+def archive_view_writer():
+    while True:
+        time.sleep(30)
+        try:
+            write_archive_views()
+        except Exception as e:
+            print("archive views:", e)
+
+
+def archive_views_status():
+    st = load_archive_view_settings()
+    lists = complete_archives(st)
+    routes = sorted({x["route"] for x in load_sources()})
+    return {"folders": [{"folder": r, "view": r in st, "name": st.get(r, {}).get("name", f"{r}_ZIP"),
+                         "archives": len(lists.get(r, [])), **(locations(st[r]["name"], True) if r in st else {})}
+                        for r in routes]}
+
+
+def set_archive_view(folder, on, name=""):
+    """Turn the archive view of a folder on or off; restarts the service (views are created at start-up)."""
+    routes = {x["route"] for x in load_sources()}
+    if folder not in routes:
+        return {"error": "unknown folder"}
+    st = load_archive_view_settings()
+    if not on:
+        if folder not in st:
+            return {"error": "no archive view for that folder"}
+        st.pop(folder)
+    else:
+        n = sanitize(name or st.get(folder, {}).get("name") or f"{folder}_ZIP")
+        taken = routes | {v["name"] for r, v in st.items() if r != folder}
+        if n in taken:
+            return {"error": f"the name {n} is already a folder or a view"}
+        st[folder] = {"name": n}
+
+    def job():
+        save_archive_view_settings(st)
+        return f"archive view of {folder}: " + (f"on, as {st[folder]['name']}" if on else "off")
+    threading.Thread(target=exclusive, args=(job,), daemon=True).start()
+    return {"ok": True, "restarting": True}
+
+
 def activity_view():
     now = time.time()
     return {"down": activity["down"], "up": activity["up"], "net_rx": activity["net_rx"], "net_tx": activity["net_tx"],
@@ -1909,6 +2063,7 @@ def main():
     threading.Thread(target=sampler, daemon=True).start()
     threading.Thread(target=indexer, daemon=True).start()
     threading.Thread(target=snapshotter, daemon=True).start()
+    threading.Thread(target=archive_view_writer, daemon=True).start()
     for _ in range(PREFETCH_WORKERS):
         threading.Thread(target=prefetch_worker, daemon=True).start()
     srv = http.server.ThreadingHTTPServer(("0.0.0.0", 8080), H)

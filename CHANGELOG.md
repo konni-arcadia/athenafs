@@ -10,6 +10,12 @@ with `.env.example`, then `sh scripts/up.sh` (it rebuilds).
 ## [Unreleased]
 
 ### Added
+- Archive views: per folder, a sibling folder showing its archives (zip, 7z, rar) that are completely in the cache, opened
+  as folders, so browsing them never downloads anything. Set on the page (Folders: turn on, rename, turn off) or with
+  `/api/archive-views`; renaming a folder renames its view unless the view's name was customised. Distribyted patches:
+  `archive_views` (the views, rebuilt when the list of complete archives changes, every 30 s) and `fs_indexed_lookup`
+  (lookups walk up the path instead of scanning every mounted filesystem).
+- Page: cache and disk donuts, rate histogram over 10 minutes with a scale, "Largest in the cache" folded at the bottom.
 - Reproducible builds: base images pinned by digest (`golang:1.24-alpine`, `alpine:3`, `debian:trixie-slim`) and
   Distribyted fetched by commit (`58d471c`, tag v0.15.0) instead of by tag. Alpine and Debian packages installed during the
   build (`apk`, `apt`) are not pinned. Go modules are pinned by Distribyted's `go.sum`.

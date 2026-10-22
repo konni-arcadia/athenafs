@@ -1,0 +1,45 @@
+diff --git a/fs/storage.go b/fs/storage.go
+index 33de3b8..8825e1f 100644
+--- a/fs/storage.go
++++ b/fs/storage.go
+@@ -163,22 +163,31 @@ func underFs(p, fsp string) bool {
+ 	return fsp == separator || p == fsp || strings.HasPrefix(p, fsp+separator)
+ }
+ 
+-func (s *storage) getFileFromFs(p string) (File, error) {
+-	for fsp, fs := range s.filesystems {
+-		if underFs(p, fsp) {
+-			return fs.Open(separator + strings.TrimPrefix(p, fsp))
++// fsFor finds the filesystem mounted at p or at the nearest parent of p, walking up the path (a few map lookups) instead
++// of scanning every filesystem: with many archives or routes the scan made each lookup cost as many steps as there were
++// filesystems (the share root stopped answering with 447,000 archives).
++func (s *storage) fsFor(p string) (Filesystem, string, bool) {
++	for q := p; ; q = path.Dir(q) {
++		if fs, ok := s.filesystems[q]; ok && underFs(p, q) {
++			return fs, q, true
++		}
++		if q == separator || q == "." || q == "" {
++			return nil, "", false
+ 		}
+ 	}
++}
++
++func (s *storage) getFileFromFs(p string) (File, error) {
++	if fs, fsp, ok := s.fsFor(p); ok {
++		return fs.Open(separator + strings.TrimPrefix(p, fsp))
++	}
+ 
+ 	return nil, os.ErrNotExist
+ }
+ 
+ func (s *storage) getDirFromFs(p string) (map[string]File, error) {
+-	for fsp, fs := range s.filesystems {
+-		if underFs(p, fsp) {
+-			path := strings.TrimPrefix(p, fsp)
+-			return fs.ReadDir(path)
+-		}
++	if fs, fsp, ok := s.fsFor(p); ok {
++		return fs.ReadDir(strings.TrimPrefix(p, fsp))
+ 	}
+ 
+ 	return nil, os.ErrNotExist

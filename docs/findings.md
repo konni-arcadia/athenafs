@@ -414,6 +414,20 @@ Open points (2026-10-22):
     of them (`getFileFromFs` is a linear scan over the filesystems, the same scan patched for folder prefixes). So the
     archive view has to be our own: only the complete archives, with an indexed lookup, never Distribyted's global mode.
     The Finder measurement will be made on a first prototype of that view.
+  - **Prototype (2026-10-22), built and kept:** patches `fs_indexed_lookup` (a lookup walks up the path's parents instead
+    of scanning every mounted filesystem) and `archive_views` (one filesystem per view, built from the list
+    `/data/archive-views.json` that the supervisor writes every 30 s; Distribyted's own zip, 7z and rar readers; an
+    archive's file is closed 30 s after its last read so its torrent can go back to sleep). The supervisor finds the complete
+    archives from the cached pieces (cheap) and keeps the per-folder settings in `/data/archive_view_settings.json`.
+    Measured with the 706 cached zips of that collection (732 complete archives in the view in all): the share root
+    answers at once; after a start the view climbs to 732/732 in about 45 s (torrents are still being added when it is
+    first built, so it retries until every archive opens); a recursive SMB walk of the 706 zips, each opened, took 1.0 s and
+    received 20 kB (background); a file read through the view is identical (SHA-256) to the one in the original zip; the
+    owner's Finder test from a Mac (views, opening zips, Quick Look, copying a file) worked and received 6.3 MB in 2.6 min,
+    the background rate of the health checks, with no piece downloaded. Turn on, rename, turn off and the view following
+    a folder rename were checked from the page and the API.
+  - Next: the "normal view off" (local library) mode. Hiding a folder from the mount would also hide it from the prefetch
+    reader, which reads through the mount; to design (for example hidden on the Samba side only).
   - Later, only if needed: an archive view as a separate SMB share with its own account. The share name itself is already
     a setting (`SMB_SHARE`).
 - **Not wanted yet:** pinning files in the cache (protecting them from eviction).

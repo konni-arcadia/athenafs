@@ -17,6 +17,9 @@ SMB like any other share. Built for collections of hundreds of torrents: tested 
   when a torrent looks dead.
 - **Folders:** torrents with the same folder name share one folder (a collection split in parts appears once); a folder can
   be renamed, a torrent moved.
+- **Archive views:** for a folder you choose, a sibling folder (`<folder>_ZIP` by default) shows its archives (zip, 7z,
+  rar) that are completely in the cache, opened as folders. Browsing it never downloads anything, whatever a file browser
+  enumerates: put archives in the cache from the page, then open them over SMB.
 - Why things are the way they are, with the measurements behind them: `docs/findings.md`. Performance per commit:
   `docs/measurements.md`.
 
@@ -65,7 +68,7 @@ The cache cap is set on the page (fixed size, or a share of the disk to keep fre
 - **Largest in the cache**, by file, folder or torrent, with **Erase** and links to open the item over SMB.
 - **Activity**: rates per torrent, files receiving data, the queue of files being cached.
 - **Folders**: torrents per folder (mounted, awake, health), **Rename** a folder (an existing name merges the two) or
-  **Move** one torrent.
+  **Move** one torrent; turn its **archive view** on or off, or rename it.
 - **Cache**: what is stored per torrent as a tree, with **Erase** on a file, a folder, a torrent or everything (a piece
   shared with a file that was not chosen is kept, and the page says so).
 - **Settings**: cache cap.
@@ -78,6 +81,7 @@ JSON over HTTP, documented on the server at `/api/docs` (and `/api/openapi.json`
 - Files: `GET /api/search?q=words` (or `q=folder:path`) and `GET /api/file?path=…` give each file's state, its torrent's
   health, and where to open it: `smb_url` (Finder) and `unc_path` (Windows).
 - Space: `GET /api/usage?by=file|folder|torrent` lists what takes the most room in the cache.
+- Archive views: `GET /api/archive-views`, `POST /api/archive-views` (`folder`, `on`, `name`).
 - Actions: `POST /api/prefetch` (read into the cache), `POST /api/prefetch/cancel`, `POST /api/erase` (a file, folder or
   torrent).
 

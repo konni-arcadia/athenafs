@@ -1,0 +1,192 @@
+diff --git a/cmd/distribyted/main.go b/cmd/distribyted/main.go
+index 78d8974..0cbdd1d 100644
+--- a/cmd/distribyted/main.go
++++ b/cmd/distribyted/main.go
+@@ -199,6 +199,7 @@ func load(configPath string, port, webDAVPort int, fuseAllowOther bool) error {
+ 	if err != nil {
+ 		return fmt.Errorf("error when loading torrents: %w", err)
+ 	}
++	fss = fs.AddArchiveViews(fss) // archive views ($DISTRIBYTED_ARCHIVE_VIEWS): complete archives shown as folders
+ 
+ 	go func() {
+ 		if mh == nil {
+diff --git a/fs/archive_view.go b/fs/archive_view.go
+new file mode 100644
+index 0000000..aba0086
+--- /dev/null
++++ b/fs/archive_view.go
+@@ -0,0 +1,174 @@
++package fs
++
++import (
++	"encoding/json"
++	"os"
++	"path"
++	"sort"
++	"strings"
++	"sync"
++	"time"
++
++	"github.com/rs/zerolog/log"
++)
++
++// Archive views: extra folders at the root of the mount that show archives (zip, 7z, rar) of a route as folders, but
++// only the archives listed in $DISTRIBYTED_ARCHIVE_VIEWS. The supervisor lists there the archives that are completely in
++// the cache, so nothing a view shows can trigger a download, whatever a file browser enumerates. The list is reread
++// every 30 s; the views themselves (their names) are fixed at start-up.
++//
++// File format: {"views": [{"name": "Folder_ZIP", "route": "Folder", "archives": ["path/in/route/a.zip", ...]}]}
++
++type archiveViewConf struct {
++	Name     string   `json:"name"`
++	Route    string   `json:"route"`
++	Archives []string `json:"archives"`
++}
++
++func readArchiveViews(file string) []archiveViewConf {
++	b, err := os.ReadFile(file)
++	if err != nil {
++		return nil
++	}
++	var c struct {
++		Views []archiveViewConf `json:"views"`
++	}
++	if json.Unmarshal(b, &c) != nil {
++		return nil
++	}
++	return c.Views
++}
++
++// AddArchiveViews adds one filesystem per configured view to fss (keys are "/name", like routes).
++func AddArchiveViews(fss map[string]Filesystem) map[string]Filesystem {
++	file := os.Getenv("DISTRIBYTED_ARCHIVE_VIEWS")
++	if file == "" {
++		return fss
++	}
++	for _, c := range readArchiveViews(file) {
++		src, ok := fss[path.Join("/", c.Route)]
++		key := path.Join("/", c.Name)
++		if !ok || c.Name == "" || fss[key] != nil {
++			log.Warn().Str("view", c.Name).Str("route", c.Route).Msg("archive view skipped (unknown route or name taken)")
++			continue
++		}
++		v := &ArchiveView{name: c.Name, route: c.Route, src: src, file: file, s: newStorage(nil)}
++		v.s.Clear()
++		v.reload()
++		go func() {
++			for range time.Tick(30 * time.Second) {
++				v.reload()
++			}
++		}()
++		fss[key] = v
++	}
++	return fss
++}
++
++type ArchiveView struct {
++	name, route, file string
++	src               Filesystem
++	mu                sync.RWMutex
++	s                 *storage
++	current           string // the list the storage was built from
++}
++
++func archiveLoader(p string) loader {
++	switch strings.ToLower(path.Ext(p)) {
++	case ".zip":
++		return &Zip{}
++	case ".7z":
++		return &SevenZip{}
++	case ".rar":
++		return &Rar{}
++	}
++	return nil
++}
++
++// reload rebuilds the view when its list of archives changed.
++func (v *ArchiveView) reload() {
++	var list []string
++	for _, c := range readArchiveViews(v.file) {
++		if c.Name == v.name {
++			list = append(list, c.Archives...)
++		}
++	}
++	sort.Strings(list)
++	key := strings.Join(list, "\n")
++	v.mu.RLock()
++	same := key == v.current
++	v.mu.RUnlock()
++	if same {
++		return
++	}
++	s := newStorage(nil)
++	s.Clear()
++	n, want := 0, 0
++	for _, rel := range list {
++		p := path.Join("/", rel)
++		l := archiveLoader(p)
++		if l == nil {
++			continue
++		}
++		want++
++		f, err := v.src.Open(p)
++		if err != nil || f.IsDir() {
++			continue
++		}
++		if s.AddFS(NewArchive(&idleCloser{f: f}, f.Size(), l), p) == nil {
++			n++
++		}
++	}
++	// at start-up the torrents are still being added in the background: until every archive could be opened, keep the list
++	// "unseen" so the next pass (30 s) builds the view again
++	if n < want {
++		key = ""
++	}
++	v.mu.Lock()
++	v.s, v.current = s, key
++	v.mu.Unlock()
++	log.Info().Str("view", v.name).Int("archives", n).Int("listed", want).Msg("archive view updated")
++}
++
++func (v *ArchiveView) Open(filename string) (File, error) {
++	v.mu.RLock()
++	defer v.mu.RUnlock()
++	return v.s.Get(filename)
++}
++
++func (v *ArchiveView) ReadDir(p string) (map[string]File, error) {
++	v.mu.RLock()
++	defer v.mu.RUnlock()
++	return v.s.Children(p)
++}
++
++// idleCloser reads an archive's file and closes it 30 s after the last read, so that the torrent it belongs to is not
++// kept awake (a dormant torrent stays in the client while one of its files is open); the next read reopens it.
++type idleCloser struct {
++	f     File
++	mu    sync.Mutex
++	timer *time.Timer
++}
++
++func (c *idleCloser) touch() {
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	if c.timer != nil {
++		c.timer.Stop()
++	}
++	c.timer = time.AfterFunc(30*time.Second, func() { c.f.Close() })
++}
++
++func (c *idleCloser) ReadAt(p []byte, off int64) (int, error) {
++	n, err := c.f.ReadAt(p, off)
++	c.touch()
++	return n, err
++}
++
++func (c *idleCloser) Read(p []byte) (int, error) {
++	n, err := c.f.Read(p)
++	c.touch()
++	return n, err
++}
++
++func (c *idleCloser) Close() error { return nil } // the timer closes the file
