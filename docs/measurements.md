@@ -29,3 +29,4 @@ Corrections (rows are not rewritten):
 | 2026-10-22T16:22Z | f960602 | 642 / 637 / 12512828 / 446609 / 258.9 TB | 1 | 19 | 637 | 10 | 1.8 | 0.4 | 0.00 | 0.00 | 0.00 | 0.02 | baseline before the ~1000-torrent import |
 | 2026-10-22T17:23Z | 67eb128 | 1051 / 1036 / 15900913 / 1760399 / 312.6 TB | 0 | 83 | 1036 | 18 | 3.4 | 0.9 | 0.00 | 0.00 | 0.00 | 0.02 | after the import (1051 sources); folder trackers, resolved magnets sleep |
 | 2026-10-22T17:42Z | 0f8c767 | 1051 / 1036 / 15900913 / 1760399 / 312.6 TB | 0 | 85 | 1036 | 10 | 3.2 | 0.9 | 0.00 | 0.00 | 0.00 | 0.02 | folder UX (one line + Manage panel); cache waits through restarts |
+| 2026-10-22T18:54Z | cf22e0a | 1051 / 1036 / 15900913 / 1760399 / 312.6 TB | 0 | 63 | 1036 | 19 | 4.1 | 0.9 | 0.00 | 0.00 | 0.00 | 0.02 | gentleman mode on (3 slots, 1 GB memory budget, upload cap 1 MB/s) |
