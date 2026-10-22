@@ -276,6 +276,29 @@ pieces, 443,000 files, 258 TB).
 - AppArmor stays unconfined for the core: a profile allowing only the FUSE mount would need loading on the host (root),
   which is not "easy to avoid". WebDAV (built into Distribyted) would remove FUSE and its privileges altogether; not done.
 
+## Importing ~400 magnets without trackers (2026-10-22)
+
+The import of 409 magnets brought `BigCollection` to 1049 torrents (1051 sources). Their metadata came in at about 3 a
+minute, then 1 in 2 minutes. Cause: 351 of the waiting magnets had no tracker (`xt` and `dn` only), so the DHT was their
+only way to find peers, and the client sends at most 25 DHT queries a second (`dht.DefaultSendLimiter`), for everything:
+a DHT lookup takes tens to hundreds of queries, the health checks and awake torrents use the same budget. Behind it, the
+client also opens at most 100 connections at a time and 10 new ones a second (library defaults, kept by Distribyted).
+The 640 older magnets of the folder all carried the same 38 trackers.
+- **Folder trackers:** when the configuration is generated, a magnet without tracker gets the trackers found in at least
+  half of its folder's magnets, plus `ATHENAFS_EXTRA_TRACKERS`; `sources.json` is not changed. Distribyted saves resolved
+  torrents with those trackers, so later wake-ups benefit too. Measured right after: 93 magnets resolved in 3 minutes,
+  against 1 in the 2 minutes before.
+- Not done: raising the DHT query limit (a Go patch) and the connection limits; to consider if trackerless magnets of a
+  folder with no trackers to borrow ever need it.
+- **Resolved magnets stayed awake:** a magnet whose metadata arrives while running was kept in the client until the next
+  restart (only torrents loaded from a .torrent at start were dormant): 343 awake after the import, Distribyted at 8.6 GB
+  and 27 % CPU. Patch `sleep_after_metadata.patch`: the metadata is saved and the torrent put to sleep at once. After the
+  restart that deployed it: 1036 mounted, 0 awake, Distribyted 3.7 GB, 14 % CPU.
+- **Incident:** the Dockerfile check after the `dumpMetainfo` sed counted every `dumpMetainfo(t)` in the file and failed
+  once the new patch added a legitimate second call; the rebuild loop then waited for a service that was not starting, and
+  the share was down about 12 minutes. The check now counts only the line the sed writes. Lesson: a build that fails must
+  stop the wait, not extend it.
+
 ## Cache cap and disk space (2026-10-21)
 
 The cap on the cache (`global_cache_size`, in MB, in `core/config.yaml`) is now shown against the disk and can be changed from the

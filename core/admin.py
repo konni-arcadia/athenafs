@@ -290,6 +290,33 @@ def saved_metainfo(h):
         return None
 
 
+def folder_trackers(sources):
+    """folder -> trackers for its magnets that have none: the trackers found in at least half of the folder's magnets
+    that do have some (a collection split in parts usually shares them), plus ATHENAFS_EXTRA_TRACKERS (comma-separated).
+    Without a tracker a magnet can only find peers through the DHT, which the client limits to 25 queries a second for
+    everything: 400 trackerless magnets took hours to get their metadata."""
+    extra = [t.strip() for t in os.environ.get("ATHENAFS_EXTRA_TRACKERS", "").split(",") if t.strip()]
+    per = {}
+    for s in sources:
+        if s["kind"] == "magnet":
+            tr = urllib.parse.parse_qs(s["value"][8:]).get("tr", [])
+            c = per.setdefault(s["route"], [collections.Counter(), 0])
+            if tr:
+                c[0].update(set(tr)); c[1] += 1
+    out = {}
+    for route, (c, n) in per.items():
+        common = [t for t, k in c.most_common() if k * 2 >= n] if n else []
+        out[route] = common + [t for t in extra if t not in common]
+    return out
+
+
+def with_trackers(magnet, trackers):
+    """The magnet link with trackers added when it has none (the stored source is not changed)."""
+    if not trackers or "tr" in urllib.parse.parse_qs(magnet[8:]):
+        return magnet
+    return magnet + "".join("&tr=" + urllib.parse.quote(t, safe="") for t in trackers)
+
+
 def generate_config(sources):
     """Base configuration (everything above `routes:`) + one route per source."""
     base = []
@@ -309,10 +336,13 @@ def generate_config(sources):
     else:
         out += "routes:\n"
         routes = {}   # one route per folder, holding every source of that folder (insertion order kept)
+        ftr = folder_trackers(sources)
         for s in sources:
             key, value = ("magnet_uri" if s["kind"] == "magnet" else "torrent_path"), s["value"]
             if s["kind"] == "magnet" and (saved := saved_metainfo(magnet_hash(value))):
                 key, value = "torrent_path", saved
+            elif s["kind"] == "magnet":
+                value = with_trackers(value, ftr.get(s["route"]))
             routes.setdefault(s["route"], []).append(f"      - {key}: {json.dumps(value)}\n")
         for route, lines in routes.items():
             out += f"  - name: {route}\n    torrents:\n" + "".join(lines)

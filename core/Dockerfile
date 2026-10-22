@@ -71,6 +71,10 @@ RUN git apply /tmp/fs_indexed_lookup.patch
 # the files of a route that are listed (the ones completely in the cache), archives opened as folders, reread every 30 s.
 COPY patches/ready_views.patch /tmp/ready_views.patch
 RUN git apply /tmp/ready_views.patch
+# Local patch: a magnet whose metadata arrives while running is saved and put to sleep at once, like a torrent loaded from
+# its .torrent; it used to stay in the client until the next restart (343 awake after importing 409 magnets, 8.6 GB).
+COPY patches/sleep_after_metadata.patch /tmp/sleep_after_metadata.patch
+RUN git apply /tmp/sleep_after_metadata.patch
 # Local patch: files of $DISTRIBYTED_ROOT_FILES are served at the root of the mount (admin.py puts links to its page there).
 COPY patches/root_files.go /src/fs/root_files.go
 RUN sed -i 's|\treturn &ContainerFs{s: s}, nil|\taddRootFiles(s)\n\treturn \&ContainerFs{s: s}, nil|' fs/container.go \
@@ -79,7 +83,7 @@ RUN sed -i 's|\treturn &ContainerFs{s: s}, nil|\taddRootFiles(s)\n\treturn \&Con
 # Kept after the patch files: it edits a line they use as context.
 COPY patches/metainfo_dump.go /src/torrent/metainfo_dump.go
 RUN sed -i 's|// Add to stats|dumpMetainfo(t) // Add to stats|' torrent/service.go \
- && test "$(grep -c 'dumpMetainfo(t)' torrent/service.go)" = 1
+ && test "$(grep -c 'dumpMetainfo(t) // Add to stats' torrent/service.go)" = 1
 RUN BIN_OUTPUT=/bin/distribyted make build
 
 FROM alpine:3@sha256:71e9b7bae160ba167fa17414401b94cbcdaf3c32feeab9298bd794a2a0614c35

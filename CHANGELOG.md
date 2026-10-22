@@ -19,6 +19,11 @@ with `.env.example`, then `sh scripts/up.sh` (it rebuilds).
 - Hide a folder from the share (page, or `POST /api/folder-visibility`): Samba neither lists nor opens it, within seconds
   and without a restart; it stays in the mount, so search, Cache and its ready view keep working. With its ready view on,
   the share shows only what is ready ("local library"). Settings: `/data/folder_settings.json`.
+- Magnets without trackers get their folder's usual trackers (and `ATHENAFS_EXTRA_TRACKERS`) when the configuration is
+  generated: 409 trackerless magnets went from about 1 resolved every 2 minutes (DHT only, 25 queries a second for the
+  whole client) to 93 in 3 minutes.
+- A magnet resolved while running goes to sleep at once (patch `sleep_after_metadata`): after the import, 343 such
+  torrents had stayed awake (Distribyted 8.6 GB); now 0.
 - Whole-folder actions on the page: erase its cache, remove the folder with or without its cached data (one restart);
   `POST /api/folder-remove`. Erasing whole torrents goes through the cached pieces (fast on torrents of hundreds of
   thousands of pieces).

@@ -54,6 +54,7 @@ Everything is set in `.env` (copy `.env.example`); every setting is optional.
 | `ATHENAFS_SMB_HOST` | host of the page URL | Host name in the `smb://` and `\\host\share` locations given by the API. |
 | `ATHENAFS_DORMANT_AFTER` | `600` | Seconds without an open file before a torrent leaves the client; `0` = never. |
 | `ATHENAFS_HEALTH_PROBE`, `ATHENAFS_HEALTH_PARALLEL` | `60`, `2` | Health check: seconds per torrent, torrents at a time; `0` = off. |
+| `ATHENAFS_EXTRA_TRACKERS` | none | Trackers (comma-separated) added to magnets that have none; a magnet without tracker also gets the trackers its folder's other magnets use. |
 | `ATHENAFS_ADD_TIMEOUT`, `ATHENAFS_READ_TIMEOUT` | `10`, `60` | Seconds to wait for a magnet's metadata at start; for a stuck read before it fails. |
 | `ATHENAFS_ARCHIVES` | `off` | `on`: zip, 7z and rar open as folders (expensive, see The SMB share). |
 | `SMB_BIND`, `SMB_PORT` | `127.0.0.1`, `445` | Address of the share. `0.0.0.0` shares it on the network. |

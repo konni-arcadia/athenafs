@@ -1,0 +1,32 @@
+diff --git a/torrent/service.go b/torrent/service.go
+index a44e3e1..bd3d802 100644
+--- a/torrent/service.go
++++ b/torrent/service.go
+@@ -146,6 +146,10 @@ func (s *Service) addLazy(r, p string) error {
+ 	if err != nil {
+ 		return err
+ 	}
++	return s.addLazyMI(r, mi)
++}
++
++func (s *Service) addLazyMI(r string, mi *metainfo.MetaInfo) error {
+ 	info, err := mi.UnmarshalInfo()
+ 	if err != nil {
+ 		return err
+@@ -329,6 +333,16 @@ func (s *Service) addTorrent(r string, t *torrent.Torrent) error {
+ }
+ 
+ func (s *Service) finishAdd(r string, t *torrent.Torrent) error {
++	if s.dormantAfter > 0 {
++		// A magnet whose metadata just arrived: save it and put the torrent to sleep, like one loaded from its .torrent.
++		// Kept in the client, every magnet resolved while running stayed awake until the next restart (343 after an
++		// import of 409 magnets: Distribyted went from 1.8 to 8.6 GB).
++		mi := t.Metainfo()
++		dumpMetainfo(t) // core/patches/metainfo_dump.go
++		t.Drop()
++		return s.addLazyMI(r, &mi)
++	}
++
+ 	// Add to stats
+ 	s.s.Add(r, t)
+ 
