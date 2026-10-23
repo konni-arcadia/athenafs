@@ -3061,6 +3061,8 @@ def plan_gentleman_locked():
         if (h not in known or x.get("seeders", 0) >= 3 or now - slots[h]["since"] > 86400 or not st["gentle_on"]
                 or slots_over_memory(slots, st, h) or h in awake["torrents"] or h == awake["drop_gentle"]):
             slots.pop(h); released[h] = now
+    for h in sorted(slots, key=lambda k: slots[k]["since"])[int(st["gentle_slots"]):]:   # the maximum was lowered:
+        slots.pop(h); released[h] = now                                               # the most recent ones leave
     if st["gentle_on"] and awake["calm"]:
         cands = sorted((h for h, x in sw.items() if h in known and h not in slots and h not in released and h not in awake["torrents"]
                         and 1 <= x["seeders"] <= 2 and x["leechers"] >= 1),
