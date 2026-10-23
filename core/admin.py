@@ -922,7 +922,7 @@ header{{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:4px 0 14p
 h1{{font-size:22px;margin:0;letter-spacing:-.01em}}h2{{font-size:15px;margin:0 0 10px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut)}}
 .pill{{padding:2px 10px;border-radius:99px;font-size:13px;background:var(--chip)}}.pill.ok{{color:var(--ok)}}.pill.busy{{color:var(--warn)}}
 .card{{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin:0 0 14px}}
-.tiles{{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin:0 0 14px}}
+.tiles{{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin:0 0 14px}}
 .tile{{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 14px}}
 .tile b{{display:block;font-size:20px;font-weight:600;font-variant-numeric:tabular-nums}}.tile span{{color:var(--mut);font-size:13px}}
 .mut{{color:var(--mut)}}.small{{font-size:13px}}
@@ -979,6 +979,10 @@ border-left:3px solid var(--warn);border-radius:8px;padding:10px 14px;box-shadow
 </section>
 <section class=card><h2>Search files</h2>
 <input id=q type=search placeholder="part of a file or folder name; several words: all must match" style="width:100%" autocomplete=off>
+<div class=add style="margin-top:6px"><span class="mut small">order</span><select id=qsort><option value="">as in the torrents</option>
+<option value=name>name</option><option value=largest>largest first</option><option value=smallest>smallest first</option></select>
+<span class="mut small">show</span><select id=qstatus><option value="">all</option><option value=cached>cached</option>
+<option value="not cached">not cached</option></select></div>
 <div class="mut small" style="margin-top:4px">Click a folder in a result to list everything under it (<code>folder:path</code>); "Cache" reads files into the cache.</div>
 <div id=srmsg style="margin-top:8px"></div><div id=sr class="small" style="margin-top:8px"></div>
 </section>
@@ -989,6 +993,7 @@ border-left:3px solid var(--warn);border-radius:8px;padding:10px 14px;box-shadow
 <div class="tile pie"><div><span>Disk free</span><b>{dfree}</b><span>of {dtotal}</span></div>{diskpie}</div>
 <div class=tile><span>Download</span><b>{down}</b><span>upload {up} · received since start {rx}</span></div>
 <div class=tile><span>Torrents</span><b>{ntor}</b><span>in {nfold} folders · {nawake} awake</span></div>
+{memtile}
 </div>
 <section class=card><h2>Activity</h2>{act}</section>
 <section class=card><h2>Folders</h2><div class=folders>{sources}</div></section>
@@ -1007,7 +1012,9 @@ kept across restarts, with Cancel and Retry</span></summary><div style="margin-t
 <label class=small><input type=radio name=rqs value=failed> failed</label>
 <label class=small><input type=radio name=rqs value=done> done</label>
 <label class=small><input type=radio name=rqs value=cancelled> cancelled</label>
-<button id=rqretryall>Retry all failed</button></div>
+<button id=rqretryall>Retry all failed</button>
+<button id=rqclear class=danger>Clear finished</button></div>
+<input id=rqq type=search placeholder="filter: part of the path; several words: all must match" style="width:100%;margin:6px 0" autocomplete=off>
 <div class="mut small">A request that gets no data waits for a seeder, as long as needed: its torrent is kept awake with the pieces it needs
 (or woken now and then when the memory budget is used, see Settings). Cancel it to give up. "Failed" is only for files that cannot be read at all.</div>
 <div id=rqres class="small wrap"></div>
@@ -1055,7 +1062,7 @@ async function runSearch(more,refresh){{  // refresh: the rows already shown aga
   const q=document.getElementById('q').value.trim(), out=document.getElementById('sr');
   if(!more&&!refresh){{so=0}} sq=q; if(!q){{out.innerHTML='';return}}
   const n=refresh?Math.min(500,so+100):100, o=refresh?0:so;
-  const r=await (await fetch('/api/search?q='+encodeURIComponent(q)+'&limit='+n+'&offset='+o)).json();
+  const r=await (await fetch('/api/search?q='+encodeURIComponent(q)+'&limit='+n+'&offset='+o+'&'+new URLSearchParams(sopts()))).json();
   if(q!==sq||(refresh&&document.querySelector('#sr [data-armed]')))return;
   if(refresh){{const t=document.getElementById('srt');if(t)t.innerHTML=r.results.map(row).join('');return}}
   if(r.error){{out.innerHTML='<span class=mut>'+esc(r.error)+'</span>';return}}
@@ -1068,6 +1075,7 @@ async function runSearch(more,refresh){{  // refresh: the rows already shown aga
   document.getElementById('srm')?.remove();
   if(shown<r.total)out.insertAdjacentHTML('beforeend','<button id=srm style="margin-top:8px">More</button>');
 }}
+const sopts=()=>({{sort:document.getElementById('qsort').value,status:document.getElementById('qstatus').value}});
 async function cache(d){{
   // shown as queued at once; the list then follows the real status (see the refresh below)
   document.querySelectorAll('#srt tr').forEach(tr=>{{const b=tr.querySelector('button.cache'),p=tr.querySelector('.pill');
@@ -1091,9 +1099,12 @@ async function loadUsage(){{
 }}
 async function loadReqs(){{
   const w=document.querySelector('input[name=rqs]:checked').value;
-  const r=await (await fetch('/api/requests?limit=100&state='+w)).json(), c=r.counts;
+  const fq=document.getElementById('rqq').value.trim();
+  const r=await (await fetch('/api/requests?limit=100&state='+w+'&q='+encodeURIComponent(fq))).json(), c=r.counts;
+  if(document.querySelector('#reqs [data-armed]'))return;
   document.getElementById('rqsum').textContent=(c.queued+c.caching)+' open · '+c.waiting+' waiting · '+c.failed+' failed · '+c.done+' done · '+c.cancelled+' cancelled';
   document.getElementById('rqretryall').disabled=!c.failed;
+  document.getElementById('rqclear').disabled=!(c.done+c.cancelled+c.failed);
   document.getElementById('rqres').innerHTML=r.results.length?'<table>'+r.results.map(x=>{{
     const pct=x.size?Math.min(100,Math.round(x.read*100/x.size)):0;
     const now=Date.now()/1000, w=x.wait;
@@ -1110,15 +1121,17 @@ async function loadReqs(){{
     const b=(['failed','cancelled'].includes(x.state)?'<button data-rq=retry data-p="'+esc(x.path)+'">Retry</button> ':'')
       +(['queued','caching','waiting','failed'].includes(x.state)?'<button class=danger data-rq=cancel data-p="'+esc(x.path)+'">Cancel</button>':'');
     return '<tr><td class=brk>'+pathHtml(x.path)+err+hl+'</td><td class=n>'+sz(x.size)+'</td><td class=n><span class="pill '+(badge[x.state]||'')+'">'+esc(x.state)+'</span><div class="small mut">'+info+'</div></td><td class=n>'+b+'</td></tr>'}}).join('')+'</table>'
-    +(r.total>r.results.length?'<div class="mut small">showing '+r.results.length+' of '+r.total+'</div>':''):'<span class=mut>None.</span>';
+    +(r.total>r.results.length?'<div class="mut small">showing '+r.results.length+' of '+r.total+'</div>':''):'<span class=mut>'+(fq?'No request matches.':'None.')+'</span>';
 }}
 document.querySelectorAll('input[name=rqs]').forEach(i=>i.addEventListener('change',loadReqs));
+let rqt;document.getElementById('rqq').addEventListener('input',()=>{{clearTimeout(rqt);rqt=setTimeout(loadReqs,250)}});
 document.getElementById('reqs').addEventListener('toggle',e=>{{if(e.target.open)loadReqs()}});
 setInterval(()=>{{if(document.getElementById('reqs').open)loadReqs()}},5000);
 document.querySelectorAll('input[name=uby]').forEach(i=>i.addEventListener('change',loadUsage));
 document.getElementById('usage').addEventListener('toggle',e=>{{if(e.target.open)loadUsage()}});  // folded: loaded when opened
 setInterval(()=>{{if(document.getElementById('usage').open&&!document.querySelector('#ures [data-armed]'))loadUsage()}},30000);
 document.getElementById('q').addEventListener('input',()=>{{clearTimeout(st);st=setTimeout(()=>runSearch(false),250)}});
+['qsort','qstatus'].forEach(id=>document.getElementById(id).addEventListener('change',()=>runSearch(false)));
 setInterval(()=>{{if([...document.querySelectorAll('#srt .pill.busy')].some(p=>p.textContent!='waiting'))runSearch(false,true)}},5000);
 document.addEventListener('click',e=>{{
   const t=e.target;
@@ -1126,6 +1139,11 @@ document.addEventListener('click',e=>{{
   else if(t.classList.contains('seg')||t.classList.contains('browse')){{e.preventDefault();const q=document.getElementById('q');q.value='folder:'+t.dataset.f;q.scrollIntoView({{block:'center'}});runSearch(false)}}
   else if(t.classList.contains('cache'))cache({{path:t.dataset.p}});
   else if(t.dataset.rq){{t.disabled=true;post('/api/requests/'+t.dataset.rq,{{path:t.dataset.p}}).then(r=>{{if(r.error)t.textContent=r.error;loadReqs()}})}}
+  else if(t.id=='rqclear'){{  // two steps in the page (a confirm() pop-up can be blocked silently)
+    if(!t.dataset.armed){{t.dataset.armed=1;t.textContent='Confirm: forget done, cancelled and failed requests';
+      setTimeout(()=>{{if(t.isConnected&&t.dataset.armed){{delete t.dataset.armed;t.textContent='Clear finished'}}}},6000)}}
+    else{{delete t.dataset.armed;t.disabled=true;post('/api/requests/clear',{{}}).then(r=>{{t.textContent=r.error?r.error:'Clear finished';loadReqs()}})}}
+  }}
   else if(t.id=='rqretryall'){{t.disabled=true;post('/api/requests/retry',{{all:'true'}}).then(r=>{{t.textContent=r.error?r.error:'Retry all failed';loadReqs()}})}}
   else if(t.classList.contains('reqlink')){{e.preventDefault();const d=document.getElementById('reqs');d.open=true;document.querySelector('input[name=rqs][value='+(t.dataset.f||'all')+']').checked=true;loadReqs();d.scrollIntoView({{block:'start'}})}}
   else if(t.classList.contains('askopen')){{  // Rename / Move: a name field in place
@@ -1145,7 +1163,7 @@ document.addEventListener('click',e=>{{
       setTimeout(()=>{{if(t.isConnected){{delete t.dataset.armed;t.textContent=t.dataset.label}}}},6000)}}
   }}
   else if(t.id=='srall'){{  // two steps in the page: a confirm() pop-up can be blocked silently (embedded browsers)
-    if(t.dataset.armed){{t.disabled=true;t.textContent='Queuing…';cache({{q:document.getElementById('q').value.trim()}})}}
+    if(t.dataset.armed){{t.disabled=true;t.textContent='Queuing…';cache({{q:document.getElementById('q').value.trim(),...sopts()}})}}
     else{{t.dataset.armed=1;t.classList.add('danger');t.textContent='Confirm: read '+t.dataset.n+' file(s), '+sz(+t.dataset.s)+' into the cache';
       setTimeout(()=>{{if(t.isConnected&&!t.disabled){{delete t.dataset.armed;t.classList.remove('danger');t.textContent='Cache all'}}}},6000)}}}}
   else if(t.id=='srm'){{so+=100;runSearch(true)}}
@@ -1238,8 +1256,9 @@ def gentleman_summary_html():
         pend = f" · {x['pieces_pending']} on the way" if x["pieces_pending"] else ""
         rows += (f"<tr><td class=small>{html.escape(x['folder'])} <span class=mut>{x['hash'][:8]}</span></td>"
                  f"<td class=\"small mut\">{s_.get('seeders', '?')} seeder(s), {s_.get('leechers', '?')} leecher(s)</td>"
-                 f"<td class=\"n small\">{x['pieces_held']} rare pieces held ({mb(held)} of {mb(x['budget'])}){pend}</td>"
-                 f"<td class=\"n small\">{mb(x['uploaded'])} sent</td></tr>")
+                 + (f"<td class=\"n small\">{x['pieces_held']} rare pieces held ({mb(held)} of {mb(x['budget'])}){pend}</td>"
+                    if x["active"] else "<td class=\"n small mut\">waking up</td>")
+                 + f"<td class=\"n small\">{mb(x['uploaded'])} sent</td></tr>")
     return head + (f"<div class=wrap><table>{rows}</table></div>" if rows else "")
 
 
@@ -1500,7 +1519,7 @@ def render(s=None):
                        ncached=sum(1 for i in s["items"] if i["cache"]), down=rate(a["down"]), up=rate(a["up"]), dfree=mb(s["disk_free"]), dtotal=mb(s["disk_total"]), dmax=mb(s["max_cap_mb"] * 1e6),
                        state=html.escape(s["state"]), pillcls="ok" if s["state"] == "running" else "busy",
                        cache=mb(s["total_cache"]), cap=cap, cachepct=pct, msg=msg, rows=rows, sources=srows, unknown=unk,
-                       dis=dis, rx=mb(s["network_rx"]), tx=mb(s["network_tx"]), ntor=len(s["sources"]), nfold=len(folders),
+                       dis=dis, memtile=memory_tile(), rx=mb(s["network_rx"]), tx=mb(s["network_tx"]), ntor=len(s["sources"]), nfold=len(folders),
                        nawake=sum(1 for x in s["sources"] if x.get("awake")))
 
 
@@ -1687,10 +1706,10 @@ API_DOC = [
     ("GET", "/api/status", "", "Summary: service, cache, disk, torrents (mounted, awake, waiting), health, transfer, prefetch, SMB address."),
     ("GET", "/api/torrents", "folder (optional)", "Every torrent: folder, status, awake, size, cached, health, location of its top folder in the share."),
     ("GET", "/api/torrents/{hash}", "", "One torrent, with its largest cached files."),
-    ("GET", "/api/search", "q (words, all must match; or folder:path), limit (≤ 500), offset",
+    ("GET", "/api/search", "q (words, all must match; or folder:path), sort (name, largest or smallest; default: torrent order), status (cached or not cached; default: all), limit (≤ 500), offset",
      "Files whose path contains every word. Each result: size, status (cached, partial, not cached, downloading, queued, caching, waiting, failed), cached bytes, its Cache request if any, health, smb_url, unc_path."),
     ("GET", "/api/file", "path (as in the share)", "One file: status, cached bytes, its Cache request if any (state, error, attempts), torrent, health, smb_url, unc_path."),
-    ("GET", "/api/requests", "state (all, open, failed, done or cancelled), limit (≤ 500), offset",
+    ("GET", "/api/requests", "state (all, open, waiting, failed, done or cancelled), q (words that must all appear in the path), limit (≤ 500), offset",
      "Cache requests, kept across restarts: state (queued, caching, waiting for a seeder, failed, done, cancelled), bytes read, error, waiting since, arrived, counts per state; a waiting one says how its torrent waits (kept awake, probed, or asleep until its next probe). A request that gets no data waits as long as needed; failed is only for files that cannot be read."),
     ("GET", "/api/waiting", "", "Torrents kept awake or probed for waiting cache requests (pieces missing, peers, next probe), the memory budget shared with gentleman mode, the ceiling, and Distribyted's memory now and over the last 24 h."),
     ("GET", "/api/usage", "by (file, folder or torrent), depth (folder levels, default 3), folder (only under this share path), limit, offset",
@@ -1705,8 +1724,9 @@ API_DOC = [
     ("POST", "/api/folder-visibility", "folder, hidden (true or false)",
      "Hide a folder from the share or show it again (Samba only, a few seconds, no restart). A hidden folder stays in the catalogue; with its ready view on, the share shows only what is ready."),
     ("GET", "/api", "", "Full status as used by the page (sources, cache tree, settings)."),
-    ("POST", "/api/prefetch", "path (repeatable) or q (a search)", "Read files into the cache ahead of time. Refused when larger than 90 % of the cache cap."),
+    ("POST", "/api/prefetch", "path (repeatable) or q (a search, with sort and status as in /api/search)", "Read files into the cache ahead of time, in that order. Refused when larger than 90 % of the cache cap."),
     ("POST", "/api/prefetch/cancel", "", "Empty the prefetch queue and stop the reads in progress."),
+    ("POST", "/api/requests/clear", "", "Forget finished Cache requests (done, cancelled, failed); queued, running and waiting ones stay."),
     ("POST", "/api/requests/retry", "path (repeatable) or all=true (every failed request)", "Queue failed or cancelled Cache requests again."),
     ("POST", "/api/requests/cancel", "path (repeatable) or all=true (everything queued, being read or waiting)",
      "Cancel Cache requests; a waiting request cancelled lets its torrent sleep."),
@@ -1792,7 +1812,7 @@ class H(http.server.BaseHTTPRequestHandler):
             if u.path == "/api":
                 body = served["json"] or json.dumps(snapshot()).encode()
             elif u.path == "/api/search":
-                res = search(one("q"), one("limit", "50"), one("offset", "0"))
+                res = search(one("q"), one("limit", "50"), one("offset", "0"), one("sort"), one("status"))
             elif u.path == "/api/activity":
                 res = activity_view()
             elif u.path == "/api/status":
@@ -1809,7 +1829,7 @@ class H(http.server.BaseHTTPRequestHandler):
             elif u.path == "/api/waiting":
                 res = awake_view()
             elif u.path == "/api/requests":
-                res = requests_view(one("state", "all"), one("limit", "50"), one("offset", "0"))
+                res = requests_view(one("state", "all"), one("limit", "50"), one("offset", "0"), one("q"))
             elif u.path == "/api/usage":
                 res = usage(one("by", "file"), one("limit", "50"), one("offset", "0"), one("depth", "3"), one("folder"))
             elif u.path == "/api/gentleman":
@@ -1837,7 +1857,7 @@ class H(http.server.BaseHTTPRequestHandler):
             self.send_response(413); self.send_header("Content-Length", "0"); self.end_headers(); return
         raw = self.rfile.read(n)
         go = lambda fn, *a: threading.Thread(target=fn, args=a, daemon=True).start()
-        if self.path in ("/api/prefetch", "/api/prefetch/cancel", "/api/requests/retry", "/api/requests/cancel", "/api/erase", "/api/ready-view", "/api/folder-visibility",
+        if self.path in ("/api/prefetch", "/api/prefetch/cancel", "/api/requests/retry", "/api/requests/cancel", "/api/requests/clear", "/api/erase", "/api/ready-view", "/api/folder-visibility",
                          "/api/folder-remove"):
             q = body_params(raw, self.headers.get("Content-Type"))
             one = lambda k: str((q.get(k) or [""])[0])
@@ -1860,6 +1880,8 @@ class H(http.server.BaseHTTPRequestHandler):
                     res = {"erasing": len(targets), "note": "the service restarts; see /api/status for the result"}
                 else:
                     res = {"error": "nothing to erase there" if not targets else "the service is busy, retry in a few seconds"}
+            elif self.path == "/api/requests/clear":
+                res = requests_clear()
             elif self.path.startswith("/api/requests/"):
                 paths = [str(x) for x in q.get("path") or []]
                 if not paths and not yes("all"):
@@ -1871,7 +1893,7 @@ class H(http.server.BaseHTTPRequestHandler):
             elif self.path.endswith("cancel"):
                 res = prefetch_cancel()
             else:
-                res = prefetch_add(one("q"), [str(x) for x in q.get("path") or []])
+                res = prefetch_add(one("q"), [str(x) for x in q.get("path") or []], one("sort"), one("status"))
             body = json.dumps(res).encode()
             self.send_response(200); self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
@@ -2160,18 +2182,50 @@ def file_state(h, path, off, size, tp, cached):
     return ("partial" if present else "not cached"), have
 
 
-def search(q, limit=50, offset=0):
-    """Files whose path (as seen in the share) contains every word of q, case-insensitive; or folder:<path>."""
-    limit, offset = max(1, min(int(limit), 500)), max(0, int(offset))
+SEARCH_SORTS = {"": "", "name": " ORDER BY files.path", "largest": " ORDER BY files.size DESC", "smallest": " ORDER BY files.size"}
+SEARCH_STATUS = ("", "cached", "not cached")   # not cached: anything not completely in the cache
+
+
+def search_rows(c, q, sort="", status="", limit=None, offset=0):
+    """(rows, total, total_size, capped) of a search, sorted and filtered by status. Rows: (hash, path, tpath, size,
+    off, status, cached bytes) when a status filter is given, else (hash, path, tpath, size, off) and the status is
+    computed by the caller for the page shown only. limit None: every row (at most SEARCH_CAP)."""
     base, args = query_sql(q)
     if not base:
+        return [], 0, 0, False
+    order = SEARCH_SORTS[sort]   # "" = the order of the index (torrent by torrent)
+    if not status:
+        total, total_size = c.execute(f"SELECT count(*), coalesce(sum(size), 0) FROM (SELECT files.size {base} LIMIT {SEARCH_CAP + 1})",
+                                      args).fetchone()
+        n = SEARCH_CAP if limit is None else limit
+        rows = c.execute(f"SELECT files.hash, files.path, files.tpath, files.size, files.off {base}{order} LIMIT ? OFFSET ?",
+                         args + [n, offset]).fetchall()
+        return rows, min(total, SEARCH_CAP), total_size, total > SEARCH_CAP
+    # a status filter: every match is looked at (at most SEARCH_CAP), then the page is cut from what is left
+    rows = c.execute(f"SELECT files.hash, files.path, files.tpath, files.size, files.off {base}{order} LIMIT {SEARCH_CAP + 1}",
+                     args).fetchall()
+    capped = len(rows) > SEARCH_CAP
+    tp, cached = torrent_pieces(), set(cache_files())
+    kept = []
+    for h, path, tpath, size, off in rows[:SEARCH_CAP]:
+        st, have = file_state(h, path, off, size, tp, cached)
+        if (st == "cached") == (status == "cached"):
+            kept.append((h, path, tpath, size, off, st, have))
+    page = kept[offset:] if limit is None else kept[offset:offset + limit]
+    return page, len(kept), sum(r[3] for r in kept), capped
+
+
+def search(q, limit=50, offset=0, sort="", status=""):
+    """Files whose path (as seen in the share) contains every word of q, case-insensitive; or folder:<path>.
+    sort: "" (torrent order), name, largest, smallest; status: "" (all), cached, not cached."""
+    limit, offset = max(1, min(int(limit), 500)), max(0, int(offset))
+    if sort not in SEARCH_SORTS or status not in SEARCH_STATUS:
+        return {"error": "sort: name, largest or smallest; status: cached or not cached"}
+    if not query_sql(q)[0]:
         return {"query": q, "total": 0, "results": []}
     c = db()
     try:
-        total, total_size = c.execute(f"SELECT count(*), coalesce(sum(size), 0) FROM (SELECT files.size {base} LIMIT {SEARCH_CAP + 1})",
-                                      args).fetchone()
-        rows = c.execute(f"SELECT files.hash, files.path, files.tpath, files.size, files.off {base} LIMIT ? OFFSET ?",   # rowid order
-                         args + [limit, offset]).fetchall()
+        rows, total, total_size, capped = search_rows(c, q, sort, status, limit, offset)
     except sqlite3.OperationalError as e:
         return {"query": q, "total": 0, "results": [], "error": str(e)}
     finally:
@@ -2179,12 +2233,13 @@ def search(q, limit=50, offset=0):
     tp, cached = torrent_pieces(), set(cache_files())
     reqs = requests_of(r[1] for r in rows)
     out = []
-    for h, path, tpath, size, off in rows:
-        st, have = file_state(h, path, off, size, tp, cached)
+    for r in rows:
+        h, path, tpath, size, off = r[:5]
+        st, have = r[5:] if status else file_state(h, path, off, size, tp, cached)
         out.append({"path": path, "size": size, "hash": h, "torrent_path": tpath, "cached": have, "status": st,
                     "request": reqs.get(path),
                     "health": health.get(h), "health_text": health_text(h), "dead": looks_dead(h), **locations(path)})
-    return {"query": q, "total": min(total, SEARCH_CAP), "total_capped": total > SEARCH_CAP, "total_size": total_size,
+    return {"query": q, "sort": sort, "status": status, "total": total, "total_capped": capped, "total_size": total_size,
             "offset": offset, "results": out}
 
 
@@ -2268,16 +2323,18 @@ def enqueue(rows, manual=True):
         prefetch["failed"].pop(p, None)
 
 
-def prefetch_add(q="", paths=()):
-    """Queue the files of a search (q, as in search(), at most SEARCH_CAP) or the given share paths for reading.
-    Refused when the total is larger than the cache cap: the first files would be evicted before the last are read."""
+def prefetch_add(q="", paths=(), sort="", status=""):
+    """Queue the files of a search (q, sort and status as in search(), at most SEARCH_CAP, in that order) or the given
+    share paths for reading. Refused when the total is larger than the cache cap: the first files would be evicted
+    before the last are read."""
+    if sort not in SEARCH_SORTS or status not in SEARCH_STATUS:
+        return {"error": "sort: name, largest or smallest; status: cached or not cached"}
     c = db()
     try:
         if q:
-            base, args = query_sql(q)
-            if not base:
+            if not query_sql(q)[0]:
                 return {"error": "empty query"}
-            rows = c.execute(f"SELECT files.path, files.size, files.hash {base} LIMIT {SEARCH_CAP}", args).fetchall()
+            rows = [(r[1], r[3], r[0]) for r in search_rows(c, q, sort, status)[0]]
         else:
             rows = [r for p in paths for r in c.execute("SELECT path, size, hash FROM files WHERE path = ?", (p,)).fetchall()]
     finally:
@@ -2328,6 +2385,17 @@ def prefetch_cancel(paths=None):
         c.close()
     waiter_wake.set()
     return {"cancelled": n}
+
+
+def requests_clear():
+    """Forget finished requests (done, cancelled, failed); queued, running and waiting ones stay."""
+    c = rdb()
+    with c:
+        n = c.execute("DELETE FROM requests WHERE state IN ('done', 'cancelled', 'failed')").rowcount
+    c.close()
+    with plock:
+        prefetch["failed"].clear()
+    return {"cleared": n}
 
 
 def prefetch_retry(paths=None):
@@ -2443,20 +2511,26 @@ REQUEST_FILTERS = {"all": None, "open": ("queued", "caching"), "waiting": ("wait
                    "cancelled": ("cancelled",)}
 
 
-def requests_view(which="all", limit=50, offset=0):
-    """Cache requests, most recently changed first (open ones: in queue order), with counts per state."""
+def requests_view(which="all", limit=50, offset=0, q=""):
+    """Cache requests, most recently changed first (open ones: in queue order), with counts per state. q: words that
+    must all appear in the path (case-insensitive)."""
     limit, offset = max(1, min(int(limit), 500)), max(0, int(offset))
     if which not in REQUEST_FILTERS:
         return {"error": "state must be one of " + ", ".join(REQUEST_FILTERS)}
     states = REQUEST_FILTERS[which]
-    where = f"WHERE state IN ({','.join('?' * len(states))})" if states else ""
+    conds = [f"state IN ({','.join('?' * len(states))})"] if states else []
+    args = list(states or ())
+    for w in q.split():
+        conds.append("path LIKE ? ESCAPE '\\'")
+        args.append("%" + w.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%")
+    where = "WHERE " + " AND ".join(conds) if conds else ""
     order = {"open": "CASE state WHEN 'caching' THEN 0 ELSE 1 END, seq", "waiting": "waiting_since"}.get(which, "updated DESC")
     c = rdb()
     try:
         counts = dict(c.execute("SELECT state, count(*) FROM requests GROUP BY state").fetchall())
-        total = c.execute(f"SELECT count(*) FROM requests {where}", states or ()).fetchone()[0]
+        total = c.execute(f"SELECT count(*) FROM requests {where}", args).fetchone()[0]
         rows = c.execute(f"SELECT path, hash, size, state, created, updated, attempts, error, read, waiting_since, arrived "
-                         f"FROM requests {where} ORDER BY {order} LIMIT ? OFFSET ?", (*(states or ()), limit, offset)).fetchall()
+                         f"FROM requests {where} ORDER BY {order} LIMIT ? OFFSET ?", (*args, limit, offset)).fetchall()
     finally:
         c.close()
     keys = ("path", "hash", "size", "state", "created", "updated", "attempts", "error", "read", "waiting_since", "arrived")
@@ -3060,6 +3134,22 @@ def apply_awake(mem_mb, ceiling_mb):
     state["message"] = (f"torrents kept awake: {mem} MB estimated at most; Distribyted's memory ceiling: {ceil} MB "
                         "(Go's own memory limit follows it at the next restart)")
     waiter_wake.set()
+
+
+def memory_tile():
+    """Distribyted's memory against the ceiling, and what is kept awake by choice against the shared budget."""
+    st = load_settings(); budget, ceiling = awake_limits(st)
+    rss, wait = awake["rss"] or distribyted_rss(), awake["listening_cost"]
+    gent = sum(x["memory_estimate"] for x in gentleman_view()["helped"])
+    used = min(rss, ceiling)
+    col = "var(--warn)" if rss > 0.9 * ceiling else "var(--acc)"
+    pie = donut([(used, col), (max(ceiling - used, 0), "var(--chip)")], f"Distribyted {mb(rss)} of a {mb(ceiling)} ceiling")
+    state_ = ("over the ceiling: putting torrents to sleep" if rss > ceiling
+              else "near the ceiling: nothing new is woken" if rss > 0.9 * ceiling else f"of a {mb(ceiling)} ceiling")
+    why = (f"Distribyted's memory. Torrents kept awake by choice (estimated): waiting cache requests {mb(wait)}, "
+           f"gentleman mode {mb(gent)}, budget {mb(budget)}. Settings to change both.")
+    return (f"<div class=\"tile pie\" title=\"{html.escape(why, quote=True)}\"><div><span>Memory</span><b>{mb(rss)}</b>"
+            f"<span>{state_} · awake by choice {mb(wait + gent)} of {mb(budget)}</span></div>{pie}</div>")
 
 
 def request_badges():
