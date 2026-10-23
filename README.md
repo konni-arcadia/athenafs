@@ -2,7 +2,7 @@
 
 **Athena Filesystem.** Torrents as a read-only network folder. Files are downloaded only when they are read, the cache has
 a size limit, and a web page (with a JSON API) adds, searches, caches and cleans. A Mac or a Windows PC reads the folder over
-SMB like any other share. Built for collections of hundreds of torrents: tested with 637 torrents, 259 TB, 447,000 files.
+SMB like any other share. Built for collections of hundreds of torrents: tested with 1,051 torrents, 313 TB, 1.76 million files.
 
 ## How this was made
 athenafs is a personal project. Most of the code, the patches to Distribyted, the research and the documentation were
@@ -181,9 +181,11 @@ Read this before exposing anything beyond the machine itself.
   `ATHENAFS_GENTLEMAN=off`) if you do not want to seed. Upload is capped (1 MB/s by default, `ATHENAFS_UPLOAD_LIMIT_KBPS`).
 
 ## Performance
-With 637 torrents (259 TB, 12.5 million pieces): every torrent in its folder 10 s after a start, the core at about 10 % of
-a core and 1.1 GB at rest, the supervisor 0.7 GB, page, API and search answering in hundredths of a second. Before the
-supervisor rework and dormant torrents the same set needed 14 GB, two cores and did not answer within 120 s.
+With 1,051 torrents (1,036 with their metadata; 313 TB, 15.9 million pieces, 1.76 million files; measured 2026-10-22):
+the share is mounted at once and every torrent is in its folder about 85 s after a start; at rest the core uses about 10 %
+of a core and 3.2 GB, the supervisor 0.9 GB; page, API and search answer in hundredths of a second. Gentleman mode with
+3 slots raises the core to about 19 % and 4.1 GB. Before the supervisor rework and dormant torrents, 637 torrents needed
+14 GB and two cores, and the page did not answer within 120 s.
 
 Measurements are bound to commits: commit, `sh scripts/up.sh`, then `sh scripts/measure.sh "note"`, which restarts the
 core, times the start-up, samples CPU, memory and page timings, and appends a row to `docs/measurements.md` (it refuses
@@ -211,8 +213,8 @@ data/                     runtime data, not in git: torrents/ (optional .torrent
 - Read-ahead is wide: a few times more data can be received than is read.
 - The health check counts peers announced on the DHT and trackers; a dormant torrent seldom connects to them, so "peers
   announced" is not proof they answer.
-- Finder browsing and copying were checked; Finder and Explorer previews and thumbnails were not, and a preview that reads a
-  file wakes its torrent. Windows was not tested.
+- Browsing and copying were checked from Finder and from Windows (listing, copies, checksums); Finder and Explorer
+  previews and thumbnails were not, and a preview that reads a file wakes its torrent.
 - Nothing can be pinned in the cache: the oldest pieces leave first when the cap is reached.
 - The patches to Distribyted are local; they are not proposed upstream.
 
