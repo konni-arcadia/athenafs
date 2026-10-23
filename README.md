@@ -212,7 +212,12 @@ data/                     runtime data, not in git: torrents/ (optional .torrent
 
 ## Licence
 Copyright the athenafs contributors. GNU General Public License version 3 or (at your option) any later version
-(`GPL-3.0-or-later`): see `LICENSE`. Distribyted, which the patches in `core/patches/` modify, is itself GPL-3.0.
+(`GPL-3.0-or-later`): see `LICENSE`.
+
+The patch files `core/patches/*.patch` modify [Distribyted](https://github.com/distribyted/distribyted) and contain
+parts of its code, which is licensed under the GPL version 3 only: those files are `GPL-3.0`. The Distribyted built by
+`core/Dockerfile` is Distribyted v0.15.0 (commit `58d471c`), modified by the athenafs contributors since 2026-10-21;
+each change is described in `core/Dockerfile`, and its date is in `CHANGELOG.md`.
 
 This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty
 of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
