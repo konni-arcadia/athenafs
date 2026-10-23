@@ -4,6 +4,12 @@
 a size limit, and a web page (with a JSON API) adds, searches, caches and cleans. A Mac or a Windows PC reads the folder over
 SMB like any other share. Built for collections of hundreds of torrents: tested with 637 torrents, 259 TB, 447,000 files.
 
+## How this was made
+athenafs is a personal project. Most of the code, the patches to Distribyted, the research and the documentation were
+written by an AI coding assistant (Claude Code) working under my direction. I set the goals, made the decisions, and
+tested it myself as a user would, from a Mac and a Windows PC on my own network; the figures in `docs/` come from real
+runs on a test host, each tied to the commit it measured. I use athenafs myself.
+
 ## How it works
 - **core**: [Distribyted](https://github.com/distribyted/distribyted) v0.15.0, built from source with local patches
   (`core/Dockerfile`, `core/patches/`, each one commented), mounts every torrent as a folder through FUSE. A supervisor
