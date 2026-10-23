@@ -193,11 +193,11 @@ With 526 sources (524 parts of one collection), starting was the problem, not se
 
 Measured with `scripts/measure.sh`, one row per commit in `docs/measurements.md` (dataset: 636 torrents, 12.5 million
 pieces, 443,000 files, 258 TB).
-- **Supervisor** (30f91c1): piece hashes as one 20-byte-per-piece block per torrent instead of lists and sets of strings;
+- **Supervisor** (c6cc571): piece hashes as one 20-byte-per-piece block per torrent instead of lists and sets of strings;
   a piece -> (torrent, index) table in SQLite (1.2 GB, built once in about 3.5 minutes, then per torrent) so that status,
   cache tree, activity and search only look at the cached pieces; status and page computed every 3 s in the background.
   Supervisor memory 13.9 GB -> 0.9 GB, `/api` and page from no answer in 120 s to instant, search 13.7 s -> 0.01 s.
-- **Dormant torrents** (e9c3b55, patch `dormant_torrents.patch`): a torrent given as a .torrent file is served from its
+- **Dormant torrents** (7d98f57, patch `dormant_torrents.patch`): a torrent given as a .torrent file is served from its
   metadata, folders list without the client, and the torrent enters the client only when one of its files is opened; it
   leaves again 600 s (`ATHENAFS_DORMANT_AFTER`) after its last file was closed. Distribyted 13.8 GB -> 1.0 GB, CPU at rest
   85 % -> 9 %, every torrent in its folder 10 s after a start (210 s before). Checked: listing never wakes a torrent; a read
@@ -205,7 +205,7 @@ pieces, 443,000 files, 258 TB).
   delay; read again afterwards it came from the cache (3 kB received). The storage `Close` of a dropped torrent is a no-op,
   the cache is shared. Dormant torrents do not seed. Magnets still without metadata stay in the client until it arrives.
   The share was checked from a Mac with this patch (browsing and copying: fine).
-- **Health check** (c9145b6, patch `health_check.patch`): dormant torrents are woken in turn, 2 at a time for 60 s
+- **Health check** (a7d5c10, patch `health_check.patch`): dormant torrents are woken in turn, 2 at a time for 60 s
   (`ATHENAFS_HEALTH_PARALLEL`, `ATHENAFS_HEALTH_PROBE`, 0 = off), without opening a file, so nothing is downloaded; the most
   peers known, connected and seeders seen are kept in SQLite by the supervisor, which also writes the order of the next
   checks (never or least recently checked first). A full round of 636 torrents takes about 5 h. A torrent that wants no
@@ -213,7 +213,7 @@ pieces, 443,000 files, 258 TB).
   signal and only "no peer found at all" counts as dead (warning when such files are queued for the cache). Cost measured:
   none visible (CPU at rest 9 %, Distribyted 1.1 GB, with two probes running).
 - **Incident:** a later edit dropped a module-level line of `admin.py` (`PAGE_URL`); the core exited at start and the
-  share was down until the fix (1d32791). The test build predated that edit: rebuild after the last edit.
+  share was down until the fix (7959dfe). The test build predated that edit: rebuild after the last edit.
 - **Incident:** Docker's default 10 s stop timeout killed Distribyted mid-stop and left a dead FUSE mount (the share was
   down). `stop_grace_period: 60s`, stale FUSE mounts cleared by the supervisor and `up.sh`.
 
@@ -396,7 +396,7 @@ case over SMB (copy first, then extract locally), a real torrent with sub-folder
   directories at the host root; the compose file now has a default for `DATA`.
 
 **Where to pick up (2026-10-23, after a long session; read this first):**
-- Running: commit `1ec26ae` (code `cf22e0a`), 1051 sources (1040 mounted, 11 without metadata), ready view
+- Running: commit `8d5ab36` (code `2cbb5e2`), 1051 sources (1040 mounted, 11 without metadata), ready view
   `BigCollection_READY` on, gentleman mode on with 3 slots (`dde7a316`, `363d8498` since 2026-10-22 18:00 UTC,
   `32f20bd8` since 18:18 UTC). Nothing needs this session: service, health checks and gentleman mode run on their own.
 - Next, in this order:
@@ -483,7 +483,7 @@ Open points (2026-10-22):
     sub-folder anywhere with exactly the hidden folder's name is hidden too.
   - Later, only if needed: an archive view as a separate SMB share with its own account. The share name itself is already
     a setting (`SMB_SHARE`).
-- **Page, folder rows (agreed 2026-10-22, built in d33b366, merged in 0f8c767):** one compact row per folder (name, torrents, size, status, and
+- **Page, folder rows (agreed 2026-10-22, built in c388dee, merged in 1305ec8):** one compact row per folder (name, torrents, size, status, and
   badges only when relevant: hidden, ready view, waiting for metadata, no peer) and one "Manage" button opening a panel in
   three blocks: "In the share" (normal view shown/hidden, ready view and its name and links, one sentence on the local
   library mode), "Folder" (rename, browse, the list of torrents), and a "Danger zone" framed apart (erase its cache,
@@ -508,7 +508,7 @@ Open points (2026-10-22):
     (none before), 115 to 463 rarest pieces were asked for each, 470 MB had arrived in the gentleman cache, nothing
     uploaded yet. But Distribyted grew from about 3.4 to 6.0 GB: an awake torrent costs about **3.5 kB of memory per
     piece** (2.6 GB for these 753,000 pieces), so the "20 MB per awake torrent" average of small torrents does not hold.
-  - **After 8.6 hours (2026-10-23 morning, commit cf22e0a):** 14.4 GB uploaded in all (1.7, 6.1 and 6.6 GB for
+  - **After 8.6 hours (2026-10-23 morning, commit 2cbb5e2):** 14.4 GB uploaded in all (1.7, 6.1 and 6.6 GB for
     `dde7a316`, `363d8498`, `32f20bd8`); gentleman cache 21.3 GB of 23 GB; two of the three now show 0 seeders and 581 and
     13 leechers at the trackers, so the rare pieces held here may be among the only copies left. **Not understood yet:**
     two torrents hold more pieces than were asked for (780 and 549 for 455): the client downloads beyond the pieces set
