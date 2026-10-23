@@ -11,6 +11,8 @@ from. Rows are only ever added. The dataset changes between rows (torrents are a
 - **times**: seconds, median of 3 (`>120`: timed out): `/api`, `/` (page), `/api/activity`, `/api/search?q=text`.
 
 Corrections (rows are not rewritten):
+- The search time used another query word before 2026-10-23 (5,511 matches against 5,139 for `text` on the same
+  dataset, same time measured side by side: 0.022 to 0.024 s for both), so the column stays comparable.
 - 99f3c5a: "mount 0" is wrong. The restart (Docker's 10 s stop timeout) killed Distribyted and left a dead FUSE mount that
   the script took for the new one; the share was in fact down. Fixed in 30f91c1 (60 s grace, stale mounts cleared, the
   script waits for a mount that can be listed).
