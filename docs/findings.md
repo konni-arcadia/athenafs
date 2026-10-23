@@ -410,17 +410,18 @@ case over SMB (copy first, then extract locally), a real torrent with sub-folder
      helped torrents over hours (measure Distribyted's RSS against the pieces and peers of each helped torrent).
   2. Check the first rotation: slots end after 24 h (from about 2026-10-23 18:00 UTC) or at 3 seeders; released torrents
      must cancel their requests, sleep, and stay out for 24 h (`/data/gentleman_state.json`, `GET /api/gentleman`).
-  3. Release `v0.1.0`: pinned builds and `CHANGELOG.md` are done; tag and GitHub release left (ask before pushing a tag).
+  3. Done: the repository is public since 2026-10-23, release `v0.1.0` (tag on 56f47aa).
   4. Ideas below (AppArmor, Windows test, patches upstream; WebDAV mode shelved by the owner).
 - How to check the state: `curl -s localhost:8080/api/status`, `/api/gentleman`, `/api/folders`; Distribyted's memory:
   `docker exec athenafs-core sh -c 'grep VmRSS /proc/$(pidof distribyted)/status'`. Measure with `scripts/measure.sh`
   after committing (see CLAUDE.md).
 
 Open points (2026-10-22):
-- **Release, stage 1:** done: base images pinned by digest, Distribyted by commit, `CHANGELOG.md`. Left: tag `v0.1.0` and
-  a GitHub release. The `apk` and `apt` packages installed during the build are not pinned. Stage 2
-  (images built by CI and published to a registry) only if other people install it; a public image needs its source
-  offered (GPL), which a private repository does not do.
+- **Release, stage 1:** done: base images pinned by digest, Distribyted by commit, `CHANGELOG.md`, release `v0.1.0`
+  published with the repository on 2026-10-23 (install tested from a fresh clone with no `.env` the same day). The `apk`
+  and `apt` packages installed during the build are not pinned. Stage 2 (images built by CI and published to a
+  registry) only if other people install it; a published image must point to its corresponding source (GPL), which the
+  public repository and its pinned commits provide, and carry the licences of what it contains.
 - **WebDAV mode (idea, shelved by the owner on 2026-10-23: not to be started unless asked):** Distribyted has a WebDAV server; serving through it instead of FUSE + Samba would remove
   `/dev/fuse`, `SYS_ADMIN` and AppArmor unconfined. To try first: Finder over WebDAV on the full set. The prefetch reader
   reads through the FUSE mount and would need another path. Windows' WebDAV client is weak (50 MB file limit by default).
