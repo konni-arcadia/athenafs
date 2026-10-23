@@ -515,6 +515,16 @@ Open points (2026-10-22):
     to normal priority, or the "held" count includes pieces it should not; the separate cache caps the space, but the
     budget logic depends on it. **Memory creeps up:** Distribyted 4.1 GB at the measurement, 5.5 GB 8 hours later, CPU 21 %
     (three torrents talking to 1 to 46 peers continuously); not covered by the 3.5 kB per piece estimate.
+  - **"Pieces held > pieces asked for", explained (2026-10-23):** the page showed 1193/441, 128/441 and 350/441. On disk
+    the gentleman cache (cap 22.2 GB) held 1062, 85 and 164 complete pieces (21 GB); the counters added up to 1671 (28 GB).
+    Two causes. (1) "Held" was the client's in-memory state: a piece the cache had evicted stayed complete for it. (2) The
+    budget counted the pieces asked for since the torrent was woken, not those held: each restart (six that day) asked
+    for 441 more rarest pieces on top of what earlier runs had left, so `dde7a316` (16 MB pieces, 50 peers, fast) reached
+    2.4 times its budget and, the cache being shared, evicted the other two slots' pieces. Fixed in the patch: each held
+    piece is checked against the storage (`Piece.UpdateCompletion`), and the budget covers held + asked-and-not-arrived.
+    After the fix the counters matched the disk (1067, 86, 158) and `dde7a316`, over its budget, asks for nothing more.
+    The page shows "N rare pieces held (size of budget) · M on the way". To check later: the two others ask for pieces
+    once their peers are back (the slots were woken again at 04:48 UTC by the rebuild).
   - **Memory budget** (`ATHENAFS_GENTLEMAN_MEMORY_MB`, 1000 by default, on the page; since 2026-10-23 the budget shared with
     waiting cache requests, `ATHENAFS_AWAKE_MEMORY_MB`, gentleman getting what they leave): candidates are taken in order of
     priority while their estimated cost (pieces x 3.5 kB) fits; a torrent too large for what is left is skipped. Lowering
@@ -561,5 +571,11 @@ Open points (2026-10-22):
     are there to see how often seeders show up and to set the budget from data.
   - **Outage during the work (about 10 min):** `GOMEMLIMIT=8000MB` is not valid for Go (it wants `MiB`): Distribyted
     exited at start; the check after the rebuild read the supervisor's state ("running"), not the mount. Check the mount.
+- **Search results follow their status (owner's report, 2026-10-23):** after "Cache all" the rows kept saying "not
+  cached": the result list was drawn once, and redrawn only after the request returned (about 2 s with the search).
+  Now a click marks the rows "queued" at once, and while rows are queued, caching or downloading the list is fetched
+  again every 5 s (not for waiting rows: a search costs about 1.4 s and a file can wait for days). Checked in the page:
+  queued at the click, caching when a read slot freed, with no click. The owner's own "Cache all" (3 files, 517 MB) left
+  no row in the request table; it was clicked during a rebuild, so it most likely reached the service while it stopped.
 - **Not wanted yet:** pinning files in the cache (protecting them from eviction).
 - **Patches upstream:** the patches are local; the crash and prefix fixes would be worth proposing to Distribyted.
