@@ -83,6 +83,11 @@ RUN git apply /tmp/upload_limit.patch
 # rarest pieces (counted from the connected peers' bitfields) within a budget, then seed them.
 COPY patches/gentleman.patch /tmp/gentleman.patch
 RUN git apply /tmp/gentleman.patch
+# Local patch: cache requests waiting for a seeder. Torrents listed by admin.py in $DISTRIBYTED_WANTED_FILE, with the piece
+# ranges their waiting requests need, are held awake on the normal cache with those pieces at normal priority, so they
+# download them as soon as a peer that has them connects (no file open, no read blocked in FUSE meanwhile).
+COPY patches/wanted.patch /tmp/wanted.patch
+RUN git apply /tmp/wanted.patch
 # Local patch: files of $DISTRIBYTED_ROOT_FILES are served at the root of the mount (admin.py puts links to its page there).
 COPY patches/root_files.go /src/fs/root_files.go
 RUN sed -i 's|\treturn &ContainerFs{s: s}, nil|\taddRootFiles(s)\n\treturn \&ContainerFs{s: s}, nil|' fs/container.go \

@@ -57,7 +57,8 @@ Everything is set in `.env` (copy `.env.example`); every setting is optional.
 | `ATHENAFS_SMB_HOST` | host of the page URL | Host name in the `smb://` and `\\host\share` locations given by the API. |
 | `ATHENAFS_DORMANT_AFTER` | `600` | Seconds without an open file before a torrent leaves the client; `0` = never. |
 | `ATHENAFS_HEALTH_PROBE`, `ATHENAFS_HEALTH_PARALLEL` | `60`, `2` | Health check: seconds per torrent, torrents at a time; `0` = off. |
-| `ATHENAFS_GENTLEMAN`, `ATHENAFS_GENTLEMAN_SLOTS`, `ATHENAFS_GENTLEMAN_SPACE_PCT`, `ATHENAFS_GENTLEMAN_MEMORY_MB` | `on`, `3`, `5`, `1000` | Gentleman mode: on or off, torrents helped at most, part of the cache cap reserved for them, memory they may use (about 3.5 kB per piece of a torrent helped; larger torrents are skipped). Defaults: the page's Settings override them. |
+| `ATHENAFS_GENTLEMAN`, `ATHENAFS_GENTLEMAN_SLOTS`, `ATHENAFS_GENTLEMAN_SPACE_PCT` | `on`, `3`, `5` | Gentleman mode: on or off, torrents helped at most, part of the cache cap reserved for them. Defaults: the page's Settings override them. |
+| `ATHENAFS_AWAKE_MEMORY_MB`, `ATHENAFS_MEMORY_CEILING_MB` | `2000`, `8000` | Memory for the torrents kept awake by choice, estimated at about 3.5 kB per piece: torrents of cache requests waiting for a seeder first, gentleman mode with what is left. Above the ceiling (Distribyted's real memory), nothing new is woken and they are put back to sleep one at a time. Defaults: the page's Settings override them. |
 | `ATHENAFS_UPLOAD_LIMIT_KBPS` | `1000` | Upload cap for everything, in kB/s (`0` = none). Also in the page's Settings. |
 | `ATHENAFS_EXTRA_TRACKERS` | none | Trackers (comma-separated) added to magnets that have none; a magnet without tracker also gets the trackers its folder's other magnets use. |
 | `ATHENAFS_ADD_TIMEOUT`, `ATHENAFS_READ_TIMEOUT` | `10`, `60` | Seconds to wait for a magnet's metadata at start; for a stuck read before it fails. |
@@ -71,10 +72,15 @@ The cache cap is set on the page (fixed size, or a share of the disk to keep fre
 - **Add** magnet links or URLs of .torrent files (one per line, a batch at once) or a .torrent file, optionally into a named
   folder. **Remove** a torrent with or without its cached data.
 - **Search** every file name of every torrent, with each file's state (cached, partial, not cached, downloading, queued,
-  caching) and the last health check of its torrent. Click a folder in a result to list everything under it
+  caching, waiting, failed) and the last health check of its torrent. Click a folder in a result to list everything under it
   (`folder:path`). **Cache** reads a file, or every result, into the cache ahead of time.
 - **Largest in the cache**, by file, folder or torrent, with **Erase** and links to open the item over SMB.
 - **Activity**: rates per torrent, files receiving data, the queue of files being cached.
+- **Cache requests**: every Cache asked for, kept across restarts (the queue resumes after one), with its state (queued,
+  caching with progress, waiting for a seeder, done, failed, cancelled), **Cancel** and **Retry**. A file that gets no data
+  waits as long as needed: its torrent is kept awake with the pieces it needs, within a memory budget (Settings); torrents
+  left out are woken 10 minutes now and then (after 15 min, 30, 1 h, then every 2 h) and at once when a health check or the
+  trackers report a seeder. The header shows how many requests wait and how many arrived in the last 24 h.
 - **Folders**: torrents per folder (mounted, awake, health), **Rename** a folder (an existing name merges the two) or
   **Move** one torrent; **hide it from the share** or show it again (immediate, no restart); turn its **ready view** on or
   off, or rename it; for the whole folder at once: **Erase its cache**, **Remove folder** (with its cached data) or
@@ -94,6 +100,10 @@ JSON over HTTP, documented on the server at `/api/docs` (and `/api/openapi.json`
 - Folders: `GET /api/folders`, `POST /api/ready-view` (`folder`, `on`, `name`), `POST /api/folder-visibility`
   (`folder`, `hidden`), `POST /api/folder-remove` (`folder`, `erase`). Items of a hidden folder have no `smb_url` or
   `unc_path`. To erase a folder's cache and keep its torrents: `POST /api/erase` with `path=<folder>`.
+- Cache requests: `GET /api/requests?state=all|open|waiting|failed|done|cancelled`, `POST /api/requests/retry` and
+  `POST /api/requests/cancel` (`path`, repeatable, or `all=true`). Search and file results carry their request.
+  `GET /api/waiting`: the torrents kept awake or probed for them, the memory budget, the ceiling, and Distribyted's memory
+  over the last 24 h.
 - Actions: `POST /api/prefetch` (read into the cache), `POST /api/prefetch/cancel`, `POST /api/erase` (a file, folder or
   torrent).
 

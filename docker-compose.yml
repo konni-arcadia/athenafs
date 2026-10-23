@@ -31,7 +31,8 @@ services:
       ATHENAFS_GENTLEMAN: "${ATHENAFS_GENTLEMAN:-on}"                 # defaults; the page's Settings override them
       ATHENAFS_GENTLEMAN_SLOTS: "${ATHENAFS_GENTLEMAN_SLOTS:-3}"
       ATHENAFS_GENTLEMAN_SPACE_PCT: "${ATHENAFS_GENTLEMAN_SPACE_PCT:-5}"
-      ATHENAFS_GENTLEMAN_MEMORY_MB: "${ATHENAFS_GENTLEMAN_MEMORY_MB:-1000}"
+      ATHENAFS_AWAKE_MEMORY_MB: "${ATHENAFS_AWAKE_MEMORY_MB:-2000}"     # waiting cache requests first, then gentleman
+      ATHENAFS_MEMORY_CEILING_MB: "${ATHENAFS_MEMORY_CEILING_MB:-8000}" # Distribyted's real memory
       ATHENAFS_UPLOAD_LIMIT_KBPS: "${ATHENAFS_UPLOAD_LIMIT_KBPS:-1000}"
       ATHENAFS_EXTRA_TRACKERS: "${ATHENAFS_EXTRA_TRACKERS:-}"   # comma-separated, added to magnets that have no tracker
       ATHENAFS_ADD_TIMEOUT: "${ATHENAFS_ADD_TIMEOUT:-}"   # overrides add_timeout of core/config.yaml when set

@@ -1,0 +1,171 @@
+diff --git a/fs/lazy.go b/fs/lazy.go
+index 3e0ba74..a3a6161 100644
+--- a/fs/lazy.go
++++ b/fs/lazy.go
+@@ -1,6 +1,7 @@
+ package fs
+ 
+ import (
++	"errors"
+ 	"strings"
+ 	"sync"
+ 	"sync/atomic"
+@@ -22,6 +23,7 @@ type Lazy struct {
+ 	drop  func(*Lazy, *torrent.Torrent)
+ 	mu    sync.Mutex
+ 	gentle atomic.Bool
++	wokeGentle atomic.Bool // the torrent in the client now was woken on the gentleman cache
+ 	t     *torrent.Torrent
+ 	open  int
+ 	since time.Time // last open or close
+@@ -160,6 +162,22 @@ func (l *Lazy) Hold() (*torrent.Torrent, error) {
+ 	return l.t, nil
+ }
+ 
++// SetWokeGentle records which cache the wake function used (called by it).
++func (l *Lazy) SetWokeGentle(on bool) { l.wokeGentle.Store(on) }
++
++// HoldNormal is Hold on the normal cache: it fails while the torrent is, or is awake on, the gentleman cache.
++func (l *Lazy) HoldNormal() (*torrent.Torrent, error) {
++	l.mu.Lock()
++	busy := l.Gentle() || (l.t != nil && l.wokeGentle.Load())
++	l.mu.Unlock()
++	if busy {
++		return nil, errGentle
++	}
++	return l.Hold()
++}
++
++var errGentle = errors.New("torrent on the gentleman cache")
++
+ // Release ends a Hold; the torrent then sleeps after the usual idle delay.
+ func (l *Lazy) Release() {
+ 	l.mu.Lock()
+diff --git a/torrent/service.go b/torrent/service.go
+index d6bd0aa..8d409f9 100644
+--- a/torrent/service.go
++++ b/torrent/service.go
+@@ -66,6 +66,9 @@ func NewService(loaders []loader.Loader, db loader.LoaderAdder, stats *Stats, c
+ 		if f := os.Getenv("DISTRIBYTED_GENTLEMAN_FILE"); f != "" {
+ 			go s.gentlemanLoop(f)
+ 		}
++		if f := os.Getenv("DISTRIBYTED_WANTED_FILE"); f != "" {
++			go s.wantedLoop(f)
++		}
+ 	}
+ 	return s
+ }
+@@ -166,6 +169,7 @@ func (s *Service) addLazyMI(r string, mi *metainfo.MetaInfo) error {
+ 		if l.Gentle() && GentleStorage != nil { // gentleman mode: its own cache (see gentleman.go)
+ 			ts.Storage = GentleStorage
+ 		}
++		l.SetWokeGentle(ts.Storage != nil && ts.Storage == GentleStorage)
+ 		t, _, err := s.c.AddTorrentSpec(ts)
+ 		if err != nil {
+ 			return nil, err
+diff --git a/torrent/wanted.go b/torrent/wanted.go
+new file mode 100644
+index 0000000..fc7b3a6
+--- /dev/null
++++ b/torrent/wanted.go
+@@ -0,0 +1,100 @@
++package torrent
++
++import (
++	"encoding/json"
++	"os"
++	"time"
++
++	"github.com/anacrolix/torrent"
++
++	"github.com/distribyted/distribyted/fs"
++)
++
++// Cache requests waiting for a seeder ("listening"): admin.py lists the torrents and the pieces its waiting requests need
++// in $DISTRIBYTED_WANTED_FILE ({"torrents": [{"hash": ..., "pieces": [[begin, end], ...]}]}, end excluded), reread every
++// 30 s. Each listed torrent is held awake on the normal cache with those pieces at normal priority, so it downloads them
++// as soon as a peer that has them connects, with no file open. A torrent no longer listed has those pieces cancelled and
++// sleeps after the usual idle delay. A torrent awake on the gentleman cache is taken only once it has slept.
++
++type wantedConf struct {
++	Torrents []struct {
++		Hash   string   `json:"hash"`
++		Pieces [][2]int `json:"pieces"`
++	} `json:"torrents"`
++}
++
++type wantedJob struct {
++	l      *fs.Lazy
++	t      *torrent.Torrent
++	pieces [][2]int
++}
++
++func (s *Service) wantedLoop(file string) {
++	jobs := map[string]*wantedJob{}
++	for range time.Tick(30 * time.Second) {
++		var c wantedConf
++		if b, err := os.ReadFile(file); err == nil {
++			_ = json.Unmarshal(b, &c)
++		}
++		want := map[string][][2]int{}
++		for _, x := range c.Torrents {
++			want[x.Hash] = x.Pieces
++		}
++		for h, j := range jobs { // released, or its pieces changed (held again below)
++			if p, ok := want[h]; !ok || !samePieces(p, j.pieces) {
++				j.apply(false)
++				j.l.Release()
++				delete(jobs, h)
++				if !ok {
++					s.log.Info().Str("hash", h).Msg("wanted: released")
++				}
++			}
++		}
++		for h, p := range want {
++			if _, ok := jobs[h]; ok {
++				continue
++			}
++			l := s.lazyByHash(h)
++			if l == nil {
++				continue
++			}
++			t, err := l.HoldNormal()
++			if err != nil {
++				continue // on the gentleman cache: try again once it has slept
++			}
++			j := &wantedJob{l: l, t: t, pieces: p}
++			j.apply(true)
++			jobs[h] = j
++			s.log.Info().Str("hash", h).Int("ranges", len(p)).Msg("wanted: listening")
++		}
++	}
++}
++
++// apply sets the job's pieces to normal priority (on) or cancels them.
++func (j *wantedJob) apply(on bool) {
++	<-j.t.GotInfo()
++	n := j.t.NumPieces()
++	for _, r := range j.pieces {
++		b, e := max(r[0], 0), min(r[1], n)
++		if b >= e {
++			continue
++		}
++		if on {
++			j.t.DownloadPieces(b, e)
++		} else {
++			j.t.CancelPieces(b, e)
++		}
++	}
++}
++
++func samePieces(a, b [][2]int) bool {
++	if len(a) != len(b) {
++		return false
++	}
++	for i := range a {
++		if a[i] != b[i] {
++			return false
++		}
++	}
++	return true
++}

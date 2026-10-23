@@ -380,7 +380,10 @@ def load_settings():
          "gentle_on": os.environ.get("ATHENAFS_GENTLEMAN", "on").lower() not in ("off", "0", "false", "no"),
          "gentle_slots": int(env_num("ATHENAFS_GENTLEMAN_SLOTS", 3)),
          "gentle_pct": env_num("ATHENAFS_GENTLEMAN_SPACE_PCT", 5),
-         "gentle_mem_mb": int(env_num("ATHENAFS_GENTLEMAN_MEMORY_MB", 1000)),
+         # torrents kept awake by choice (waiting cache requests first, then gentleman), estimated; and a ceiling on
+         # Distribyted's real memory above which they are put back to sleep
+         "awake_mem_mb": int(env_num("ATHENAFS_AWAKE_MEMORY_MB", 2000)),
+         "memory_ceiling_mb": int(env_num("ATHENAFS_MEMORY_CEILING_MB", 8000)),
          "upload_kbps": int(env_num("ATHENAFS_UPLOAD_LIMIT_KBPS", 1000))}
     try:
         d.update(json.load(open(SETTINGS)))
@@ -520,7 +523,11 @@ def start():
                DISTRIBYTED_UPLOAD_LIMIT=str(int(st["upload_kbps"]) * 1000),
                DISTRIBYTED_GENTLEMAN_FILE=GENTLEMAN_FILE,
                DISTRIBYTED_GENTLEMAN_SPACE=str(int(gentle_space_bytes(st))),
-               DISTRIBYTED_GENTLEMAN_CACHE=GENTLEMAN_CACHE)
+               DISTRIBYTED_GENTLEMAN_CACHE=GENTLEMAN_CACHE,
+               DISTRIBYTED_WANTED_FILE=WANTED_FILE,
+               # Go's soft memory limit: near the ceiling the garbage collector runs more often and returns memory to the
+               # system, so the ceiling (see plan_waiting) acts on garbage before any torrent is put to sleep
+               GOMEMLIMIT=f"{int(st['memory_ceiling_mb']) * 1000 // 1024 * 1000 // 1024}MiB")
     state["proc"] = subprocess.Popen(["/bin/distribyted", "--config", GENERATED, "--http-port", "4444"], env=env)
     state["state"] = "running"
 
@@ -959,7 +966,7 @@ border-left:3px solid var(--warn);border-radius:8px;padding:10px 14px;box-shadow
 .secbox ul{{margin:0 0 8px;padding-left:18px}}.secbox li{{margin:4px 0}}.brk{{word-break:break-word}}#sr td.small{{word-break:break-word}}#sr td button{{padding:1px 8px;font-size:12px}}
 </style>
 <div class=page>
-<header><h1>athenafs</h1><span id=pill class="pill {pillcls}">{state}</span>{secwarn}</header>
+<header><h1>athenafs</h1><span id=pill class="pill {pillcls}">{state}</span><span id=wpill>{waitpill}</span>{secwarn}</header>
 <section class=card><h2>Add torrents</h2>
 <form class=add method=post action=/add>
   <textarea class=l name=link rows=2 placeholder="magnet:?xt=urn:btih:…  or  https://…/file.torrent&#10;several: one per line" required></textarea>
@@ -991,6 +998,20 @@ data, {cache} · per torrent and file, with Erase</span></summary><div class=wra
 {rows}
 </table></div>{unknown}</details></section>
 </main>
+<section class=card><details id=reqs><summary><b>Cache requests</b> <span id=rqsum class="mut small">every "Cache" asked for,
+kept across restarts, with Cancel and Retry</span></summary><div style="margin-top:10px">
+<div class=add><span class="mut small">show</span>
+<label class=small><input type=radio name=rqs value=all checked> all</label>
+<label class=small><input type=radio name=rqs value=open> queued and in progress</label>
+<label class=small><input type=radio name=rqs value=waiting> waiting for a seeder</label>
+<label class=small><input type=radio name=rqs value=failed> failed</label>
+<label class=small><input type=radio name=rqs value=done> done</label>
+<label class=small><input type=radio name=rqs value=cancelled> cancelled</label>
+<button id=rqretryall>Retry all failed</button></div>
+<div class="mut small">A request that gets no data waits for a seeder, as long as needed: its torrent is kept awake with the pieces it needs
+(or woken now and then when the memory budget is used, see Settings). Cancel it to give up. "Failed" is only for files that cannot be read at all.</div>
+<div id=rqres class="small wrap"></div>
+</div></details></section>
 <section class=card><details id=usage><summary><b>Largest in the cache</b> <span class="mut small">by file, folder or torrent, with Erase</span></summary><div style="margin-top:10px">
 <div class=add><span class="mut small">by</span>
 <label class=small><input type=radio name=uby value=file checked> file</label>
@@ -1012,7 +1033,9 @@ It does not delete the .torrent files of the setup or the configuration.</p></di
 const esc=s=>s.replace(/[&<>"']/g,c=>({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[c]));
 const sz=n=>n<1e6?(n/1e3).toFixed(0)+' kB':n<1e9?(n/1e6).toFixed(0)+' MB':n<1e12?(n/1e9).toFixed(2)+' GB':(n/1e12).toFixed(2)+' TB';
 const post=async(u,d)=>(await fetch(u,{{method:'POST',headers:{{'Content-Type':'application/x-www-form-urlencoded'}},body:new URLSearchParams(d)}})).json();
-const badge={{'cached':'ok','partial':'','not cached':'mut','queued':'busy','caching':'busy','downloading':'busy'}};
+const badge={{'cached':'ok','partial':'','not cached':'mut','queued':'busy','caching':'busy','downloading':'busy','failed':'warn','done':'ok','cancelled':'mut','waiting':'busy'}};
+const dur=s=>s<90?Math.round(s)+' s':s<5400?Math.round(s/60)+' min':s<129600?(s/3600).toFixed(1).replace('.0','')+' h':(s/86400).toFixed(1).replace('.0','')+' days';
+const ago=t=>{{const s=Date.now()/1000-t;return s<90?Math.round(s)+' s ago':s<5400?Math.round(s/60)+' min ago':s<129600?Math.round(s/3600)+' h ago':Math.round(s/86400)+' d ago'}};
 let sq='',so=0,st;
 function pathHtml(p){{  // each folder of the path lists that folder when clicked
   const parts=p.split('/'); let acc='';
@@ -1022,9 +1045,11 @@ function row(f){{
   const pct=f.size?Math.min(100,Math.round(f.cached*100/f.size)):0;
   const label=f.status=='partial'?'partial '+pct+'%':f.status;
   const hl='<div class="small '+(f.dead?'warn':'mut')+'">'+esc(f.health_text||'')+'</div>';
-  const btn=['cached','queued','caching'].includes(f.status)?'':'<button class=cache data-p="'+esc(f.path)+'">Cache</button>';
+  const btn=['cached','queued','caching','waiting'].includes(f.status)?'':'<button class=cache data-p="'+esc(f.path)+'">'+(f.status=='failed'?'Retry':'Cache')+'</button>';
+  const rq=!f.request?'':f.status=='failed'?'<div class="small warn">cache request failed '+ago(f.request.updated)+': '+esc(f.request.error)+'</div>'
+    :f.status=='waiting'?'<div class="small mut">waiting for a seeder for '+dur(Date.now()/1000-f.request.waiting_since)+' (see Cache requests)</div>':'';
   const lk=f.smb_url?' <span class=mut>· <a href="'+esc(f.smb_url)+'" title="'+esc(f.smb_url)+'">open</a> · <a href=# data-copy="'+esc(f.unc_path)+'" title="'+esc(f.unc_path)+'">copy \\\\\\\\ path</a></span>':' <span class=mut>· hidden from the share</span>';
-  return '<tr><td class=small>'+pathHtml(f.path)+lk+hl+'</td><td class=n>'+sz(f.size)+'</td><td class=n><span class="pill '+(badge[f.status]||'')+'">'+esc(label)+'</span></td><td class=n>'+btn+'</td></tr>';
+  return '<tr><td class=small>'+pathHtml(f.path)+lk+hl+rq+'</td><td class=n>'+sz(f.size)+'</td><td class=n><span class="pill '+(badge[f.status]||'')+'">'+esc(label)+'</span></td><td class=n>'+btn+'</td></tr>';
 }}
 async function runSearch(more){{
   const q=document.getElementById('q').value.trim(), out=document.getElementById('sr');
@@ -1059,6 +1084,32 @@ async function loadUsage(){{
     return '<tr><td class=brk>'+name+loc+'</td><td class=n>'+sz(x.cached)
       +(x.size?' <span class=mut>of '+sz(x.size)+'</span>':'')+'</td><td class=n><button class=danger data-uerase="'+esc(what)+'">Erase</button></td></tr>'}}).join('')+'</table>';
 }}
+async function loadReqs(){{
+  const w=document.querySelector('input[name=rqs]:checked').value;
+  const r=await (await fetch('/api/requests?limit=100&state='+w)).json(), c=r.counts;
+  document.getElementById('rqsum').textContent=(c.queued+c.caching)+' open · '+c.waiting+' waiting · '+c.failed+' failed · '+c.done+' done · '+c.cancelled+' cancelled';
+  document.getElementById('rqretryall').disabled=!c.failed;
+  document.getElementById('rqres').innerHTML=r.results.length?'<table>'+r.results.map(x=>{{
+    const pct=x.size?Math.min(100,Math.round(x.read*100/x.size)):0;
+    const now=Date.now()/1000, w=x.wait;
+    let info=x.state=='caching'?sz(x.read)+' / '+sz(x.size)+'<div class=bar><i style="width:'+pct+'%"></i></div>':x.state+' '+ago(x.updated);
+    if(x.state=='waiting'){{
+      info='for '+dur(now-x.waiting_since);
+      if(w)info+='<br>'+(w.mode=='listening'?'kept awake: '+w.peers+' peer'+(w.peers==1?'':'s')+', '+w.seeders+' seeder'+(w.seeders==1?'':'s')
+        :w.mode=='probing'?'probing now ('+w.peers+' peers)':'asleep (memory budget used), next probe in '+dur(Math.max(0,w.next_probe-now)))
+        +' · '+w.missing_pieces+' piece'+(w.missing_pieces==1?'':'s')+' missing';
+    }}
+    if(x.state=='done'&&x.arrived&&x.waiting_since)info+='<br>arrived after waiting '+dur(x.arrived-x.waiting_since);
+    const err=x.error&&!['done','waiting'].includes(x.state)?'<div class="small '+(x.state=='failed'?'warn':'mut')+'">'+esc(x.error)+'</div>':'';
+    const hl='<div class="small '+(x.dead?'warn':'mut')+'">'+esc(x.health_text||'')+'</div>';
+    const b=(['failed','cancelled'].includes(x.state)?'<button data-rq=retry data-p="'+esc(x.path)+'">Retry</button> ':'')
+      +(['queued','caching','waiting','failed'].includes(x.state)?'<button class=danger data-rq=cancel data-p="'+esc(x.path)+'">Cancel</button>':'');
+    return '<tr><td class=brk>'+pathHtml(x.path)+err+hl+'</td><td class=n>'+sz(x.size)+'</td><td class=n><span class="pill '+(badge[x.state]||'')+'">'+esc(x.state)+'</span><div class="small mut">'+info+'</div></td><td class=n>'+b+'</td></tr>'}}).join('')+'</table>'
+    +(r.total>r.results.length?'<div class="mut small">showing '+r.results.length+' of '+r.total+'</div>':''):'<span class=mut>None.</span>';
+}}
+document.querySelectorAll('input[name=rqs]').forEach(i=>i.addEventListener('change',loadReqs));
+document.getElementById('reqs').addEventListener('toggle',e=>{{if(e.target.open)loadReqs()}});
+setInterval(()=>{{if(document.getElementById('reqs').open)loadReqs()}},5000);
 document.querySelectorAll('input[name=uby]').forEach(i=>i.addEventListener('change',loadUsage));
 document.getElementById('usage').addEventListener('toggle',e=>{{if(e.target.open)loadUsage()}});  // folded: loaded when opened
 setInterval(()=>{{if(document.getElementById('usage').open&&!document.querySelector('#ures [data-armed]'))loadUsage()}},30000);
@@ -1068,6 +1119,9 @@ document.addEventListener('click',e=>{{
   if(t.dataset.copy!==undefined){{e.preventDefault();navigator.clipboard?.writeText(t.dataset.copy).then(()=>{{t.textContent='copied'}},()=>{{t.textContent=t.dataset.copy;t.style.userSelect='all'}})}}
   else if(t.classList.contains('seg')||t.classList.contains('browse')){{e.preventDefault();const q=document.getElementById('q');q.value='folder:'+t.dataset.f;q.scrollIntoView({{block:'center'}});runSearch(false)}}
   else if(t.classList.contains('cache'))cache({{path:t.dataset.p}});
+  else if(t.dataset.rq){{t.disabled=true;post('/api/requests/'+t.dataset.rq,{{path:t.dataset.p}}).then(r=>{{if(r.error)t.textContent=r.error;loadReqs()}})}}
+  else if(t.id=='rqretryall'){{t.disabled=true;post('/api/requests/retry',{{all:'true'}}).then(r=>{{t.textContent=r.error?r.error:'Retry all failed';loadReqs()}})}}
+  else if(t.classList.contains('reqlink')){{e.preventDefault();const d=document.getElementById('reqs');d.open=true;document.querySelector('input[name=rqs][value='+(t.dataset.f||'all')+']').checked=true;loadReqs();d.scrollIntoView({{block:'start'}})}}
   else if(t.classList.contains('askopen')){{  // Rename / Move: a name field in place
     const f=t.closest('form'); f.dataset.armed=1; t.remove();
     const fld=f.dataset.field||'new';
@@ -1099,6 +1153,7 @@ setInterval(async()=>{{try{{
   n.querySelectorAll('details').forEach(x=>{{if(o.has(x.dataset.k))x.open=true}});
   document.getElementById('m').replaceWith(n);
   const p=d.getElementById('pill'); if(p)document.getElementById('pill').replaceWith(p);
+  const wp=d.getElementById('wpill'); if(wp)document.getElementById('wpill').replaceWith(wp);
 }}catch(e){{}}}},5000)
 </script>"""
 
@@ -1154,7 +1209,7 @@ def gentleman_view():
     for r_ in rows:
         r_["memory_estimate"] = tp[r_["hash"]]["npieces"] * BYTES_PER_AWAKE_PIECE if r_["hash"] in tp else 0
     return {"on": st["gentle_on"], "slots": int(st["gentle_slots"]), "space": gentle_space_bytes(st),
-            "memory_budget": int(st["gentle_mem_mb"]) * 1_000_000,
+            "memory_budget": gentle_memory(st),
             "upload_limit": int(st["upload_kbps"]) * 1000, "helped": rows,
             "swarm": {"scraped": len(known), "dead": sum(1 for x in known if x["seeders"] == 0),
                       "in_difficulty": sum(1 for x in known if 1 <= x["seeders"] <= 2 and x["leechers"] >= 1),
@@ -1321,10 +1376,10 @@ def render(s=None):
         for x in xs:
             counts[x["status"]] = counts.get(x["status"], 0) + 1
         status = ", ".join(f"{n} {st}" if len(xs) > 1 else st for st, n in counts.items())
-        awake = sum(1 for x in xs if x.get("awake"))
+        nawk = sum(1 for x in xs if x.get("awake"))
         dead = sum(1 for x in xs if looks_dead(x["hash"]))
         checked = sum(1 for x in xs if x["hash"] in health)
-        status += f" · {awake} awake" if len(xs) > 1 else (" · awake" if awake else " · dormant")
+        status += f" · {nawk} awake" if len(xs) > 1 else (" · awake" if nawk else " · dormant")
         status += (f" · health: {checked}/{len(xs)} checked, {dead} with no peer found" if len(xs) > 1
                    else f" · {health_text(xs[0]['hash'])}")
         inner = ""
@@ -1364,17 +1419,36 @@ def render(s=None):
                 f"<label><input type=checkbox name=on value=1 {'checked' if st['gentle_on'] else ''}> help torrents in difficulty</label>"
                 f"<input type=number name=slots min=0 max=20 value={int(st['gentle_slots'])} style=\"width:60px\"> slots"
                 f"<input type=number name=pct min=0 max=50 step=0.5 value={st['gentle_pct']:g} style=\"width:70px\"> % of the cache cap"
-                f"<input type=number name=mem min=0 step=100 value={int(st['gentle_mem_mb'])} style=\"width:80px\"> MB of memory at most"
                 f"<span class=mut>· upload cap</span><input type=number name=upload min=0 step=100 value={int(st['upload_kbps'])} "
                 f"style=\"width:90px\"> kB/s (0 = none)<button type=submit>Apply (restarts)</button></form>"
                 "<div class=\"mut small\">Torrents with 1 or 2 seeders and leechers waiting (asked to the trackers every 6 h) get a "
                 "slot: their rarest pieces are downloaded into a separate part of the cache and seeded under the upload cap, "
-                "until they have 3 seeders again or for 24 h. Each slot keeps one torrent awake, which costs about 3.5 kB of memory "
-                "per piece (a few MB for a small torrent, more than 1 GB for a torrent of tens of TB): torrents that would exceed "
-                "the memory budget are skipped. "
+                "until they have 3 seeders again or for 24 h, within the memory left by waiting cache requests (below). "
                 "Seeding shows this machine's IP address to more peers: see the Security section of the README.</div>")
+    capform += ("<form class=add method=post action=/awake style=\"margin-top:12px\"><span class=mut>Torrents kept awake:</span>"
+                f"<input type=number name=mem min=0 step=100 value={int(st['awake_mem_mb'])} style=\"width:90px\"> MB estimated at most"
+                f"<span class=mut>· put them back to sleep when Distribyted uses more than</span><input type=number name=ceiling "
+                f"min=1000 step=500 value={int(st['memory_ceiling_mb'])} style=\"width:90px\"> MB<button type=submit>Apply</button></form>"
+                "<div class=\"mut small\">A cache request that gets no data waits for a seeder: its torrent is kept awake with the "
+                "pieces it needs, cheapest torrents first, within this budget (about 3.5 kB per piece: a few MB for a small torrent, "
+                "more than 1 GB for one of tens of TB); gentleman mode gets what is left. Torrents left out are woken 10 min now and "
+                "then (after 15 min, 30, 1 h, then every 2 h) and at once when a health check or the trackers report a seeder. "
+                f"Above the ceiling, nothing new is woken and gentleman slots, then the largest waiting torrents, are put back to "
+                f"sleep one at a time. Distribyted uses {mb(awake['rss'])} now.</div>")
+    nwait, narrived = request_badges()
+    waitpill = ((f" <a href=#reqs class=\"pill busy reqlink\" data-f=waiting title=\"cache requests waiting for a seeder\">"
+                 f"{nwait} waiting</a>" if nwait else "")
+                + (f" <a href=#reqs class=\"pill ok reqlink\" data-f=done title=\"waiting cache requests that arrived in the last 24 h\">"
+                   f"{narrived} arrived</a>" if narrived else ""))
     a = activity_view()
     act = histogram_svg() + gentleman_summary_html()
+    if awake["torrents"]:
+        ws = awake["torrents"].values()
+        act += (f"<div class=small style=\"margin-top:8px\"><b>Waiting for a seeder</b> <span class=mut>· {nwait} cache request(s) in "
+                f"{len(ws)} torrent(s): {sum(x['mode'] == 'listening' for x in ws)} kept awake, {sum(x['mode'] == 'probing' for x in ws)} "
+                f"being probed, {sum(x['mode'] == 'sleeping' for x in ws)} asleep until their next probe · Distribyted uses "
+                f"{mb(awake['rss'])} of {mb(awake.get('ceiling', 0))}{' (over the ceiling: nothing new is woken)' if awake['over'] else ''}"
+                f"</span> <a href=#reqs class=reqlink data-f=waiting>details</a></div>")
     if a["torrents"]:
         act += "<div class=wrap><table><tr><th>Torrent</th><th>Folder</th><th class=n>Down</th><th class=n>Up</th><th class=n>Peers</th></tr>"
         for x in a["torrents"][:15]:
@@ -1397,7 +1471,9 @@ def render(s=None):
         act += "</table></div>"
     if pf["failed"]:
         act += "".join(f"<div class=\"mut small\">could not cache {html.escape(f['path'])} "
-                       f"({time.strftime('%H:%M', time.localtime(f.get('at', 0)))}): {html.escape(f['error'])}</div>" for f in pf["failed"][-3:])
+                       f"({time.strftime('%H:%M', time.localtime(f.get('at', 0)))}): {html.escape(f['error'])}</div>" for f in pf["failed_recent"])
+        act += (f"<div class=small>{pf['failed']} failed request{'s' if pf['failed'] > 1 else ''}: see "
+                "<a href=#reqs class=reqlink data-f=failed>Cache requests</a></div>")
     if a["files"]:
         act += (f"<div class=\"mut small\" style=\"margin-top:10px\">Files that received data in the last {WINDOW} s "
                 "(counted per completed piece):</div><div class=wrap><table>")
@@ -1412,7 +1488,7 @@ def render(s=None):
     diskpie = (donut([(other, "var(--mut)"), (s["total_cache"], "var(--acc)"), (s["disk_free"], "var(--chip)")],
                      f"other data {mb(other)} · cache {mb(s['total_cache'])} · free {mb(s['disk_free'])}")
                + "") if s["disk_total"] else ""
-    return PAGE.format(capform=capform, act=act, cachepie=cachepie, diskpie=diskpie, secwarn=secwarn,
+    return PAGE.format(capform=capform, act=act, cachepie=cachepie, diskpie=diskpie, secwarn=secwarn, waitpill=waitpill,
                        ncached=sum(1 for i in s["items"] if i["cache"]), down=rate(a["down"]), up=rate(a["up"]), dfree=mb(s["disk_free"]), dtotal=mb(s["disk_total"]), dmax=mb(s["max_cap_mb"] * 1e6),
                        state=html.escape(s["state"]), pillcls="ok" if s["state"] == "running" else "busy",
                        cache=mb(s["total_cache"]), cap=cap, cachepct=pct, msg=msg, rows=rows, sources=srows, unknown=unk,
@@ -1465,7 +1541,7 @@ def api_status():
                        "no_peer_found": sum(1 for x in checked if not x["known"] and not x["connected"])},
             "transfer": {"down": a["down"], "up": a["up"]},
             "prefetch": {"queued": a["prefetch"]["queued"], "active": len(a["prefetch"]["active"]),
-                         "done": a["prefetch"]["done"], "failed": len(a["prefetch"]["failed"])},
+                         "done": a["prefetch"]["done"], "failed": a["prefetch"]["failed"]},
             "smb": locations("", True), "warnings": WARNINGS}
 
 
@@ -1500,8 +1576,8 @@ def api_file(path):
     tp = torrent_pieces()
     st, have = file_state(h, p, off, size, tp, set(cache_files()))
     t = tp.get(h)
-    return {"path": p, "size": size, "status": st, "cached": have, "torrent": {"hash": h, "name": t["name"] if t else "",
-            "path_in_torrent": tpath}, "health": health.get(h), "health_text": health_text(h), **locations(p)}
+    return {"path": p, "size": size, "status": st, "cached": have, "request": requests_of([p]).get(p),
+            "torrent": {"hash": h, "name": t["name"] if t else "", "path_in_torrent": tpath}, "health": health.get(h), "health_text": health_text(h), **locations(p)}
 
 
 def usage(by="file", limit=50, offset=0, depth=3, folder=""):
@@ -1604,8 +1680,11 @@ API_DOC = [
     ("GET", "/api/torrents", "folder (optional)", "Every torrent: folder, status, awake, size, cached, health, location of its top folder in the share."),
     ("GET", "/api/torrents/{hash}", "", "One torrent, with its largest cached files."),
     ("GET", "/api/search", "q (words, all must match; or folder:path), limit (≤ 500), offset",
-     "Files whose path contains every word. Each result: size, status (cached, partial, not cached, downloading, queued, caching), cached bytes, health, smb_url, unc_path."),
-    ("GET", "/api/file", "path (as in the share)", "One file: status, cached bytes, torrent, health, smb_url, unc_path."),
+     "Files whose path contains every word. Each result: size, status (cached, partial, not cached, downloading, queued, caching, waiting, failed), cached bytes, its Cache request if any, health, smb_url, unc_path."),
+    ("GET", "/api/file", "path (as in the share)", "One file: status, cached bytes, its Cache request if any (state, error, attempts), torrent, health, smb_url, unc_path."),
+    ("GET", "/api/requests", "state (all, open, failed, done or cancelled), limit (≤ 500), offset",
+     "Cache requests, kept across restarts: state (queued, caching, waiting for a seeder, failed, done, cancelled), bytes read, error, waiting since, arrived, counts per state; a waiting one says how its torrent waits (kept awake, probed, or asleep until its next probe). A request that gets no data waits as long as needed; failed is only for files that cannot be read."),
+    ("GET", "/api/waiting", "", "Torrents kept awake or probed for waiting cache requests (pieces missing, peers, next probe), the memory budget shared with gentleman mode, the ceiling, and Distribyted's memory now and over the last 24 h."),
     ("GET", "/api/usage", "by (file, folder or torrent), depth (folder levels, default 3), folder (only under this share path), limit, offset",
      "What takes the most room in the cache, largest first."),
     ("GET", "/api/activity", "", "Rates per torrent, files that received data in the last 30 s, prefetch queue."),
@@ -1620,6 +1699,9 @@ API_DOC = [
     ("GET", "/api", "", "Full status as used by the page (sources, cache tree, settings)."),
     ("POST", "/api/prefetch", "path (repeatable) or q (a search)", "Read files into the cache ahead of time. Refused when larger than 90 % of the cache cap."),
     ("POST", "/api/prefetch/cancel", "", "Empty the prefetch queue and stop the reads in progress."),
+    ("POST", "/api/requests/retry", "path (repeatable) or all=true (every failed request)", "Queue failed or cancelled Cache requests again."),
+    ("POST", "/api/requests/cancel", "path (repeatable) or all=true (everything queued, being read or waiting)",
+     "Cancel Cache requests; a waiting request cancelled lets its torrent sleep."),
     ("POST", "/api/erase", "path (file or folder of the share) or hash (whole torrent)",
      "Erase cached data. Restarts the service (the share is unavailable a few seconds). Edge pieces shared with files that were not chosen are kept."),
 ]
@@ -1716,6 +1798,10 @@ class H(http.server.BaseHTTPRequestHandler):
                     if rows else {"error": "unknown torrent"}
             elif u.path == "/api/file":
                 res = api_file(one("path"))
+            elif u.path == "/api/waiting":
+                res = awake_view()
+            elif u.path == "/api/requests":
+                res = requests_view(one("state", "all"), one("limit", "50"), one("offset", "0"))
             elif u.path == "/api/usage":
                 res = usage(one("by", "file"), one("limit", "50"), one("offset", "0"), one("depth", "3"), one("folder"))
             elif u.path == "/api/gentleman":
@@ -1743,7 +1829,7 @@ class H(http.server.BaseHTTPRequestHandler):
             self.send_response(413); self.send_header("Content-Length", "0"); self.end_headers(); return
         raw = self.rfile.read(n)
         go = lambda fn, *a: threading.Thread(target=fn, args=a, daemon=True).start()
-        if self.path in ("/api/prefetch", "/api/prefetch/cancel", "/api/erase", "/api/ready-view", "/api/folder-visibility",
+        if self.path in ("/api/prefetch", "/api/prefetch/cancel", "/api/requests/retry", "/api/requests/cancel", "/api/erase", "/api/ready-view", "/api/folder-visibility",
                          "/api/folder-remove"):
             q = body_params(raw, self.headers.get("Content-Type"))
             one = lambda k: str((q.get(k) or [""])[0])
@@ -1766,6 +1852,14 @@ class H(http.server.BaseHTTPRequestHandler):
                     res = {"erasing": len(targets), "note": "the service restarts; see /api/status for the result"}
                 else:
                     res = {"error": "nothing to erase there" if not targets else "the service is busy, retry in a few seconds"}
+            elif self.path.startswith("/api/requests/"):
+                paths = [str(x) for x in q.get("path") or []]
+                if not paths and not yes("all"):
+                    res = {"error": "give path (repeatable) or all=true"}
+                elif self.path.endswith("retry"):
+                    res = prefetch_retry(paths or None)
+                else:
+                    res = prefetch_cancel(paths or None)
             elif self.path.endswith("cancel"):
                 res = prefetch_cancel()
             else:
@@ -1783,7 +1877,9 @@ class H(http.server.BaseHTTPRequestHandler):
             if self.path == "/erase" and (one("h") == "all" or re.fullmatch(r"[0-9a-f]{40}", one("h"))):
                 go(erase, one("h"), one("p"))
             elif self.path == "/gentleman":
-                go(apply_gentleman, one("on") == "1", one("slots") or "0", one("pct") or "0", one("upload") or "0", one("mem") or "0")
+                go(apply_gentleman, one("on") == "1", one("slots") or "0", one("pct") or "0", one("upload") or "0")
+            elif self.path == "/awake":
+                apply_awake(one("mem"), one("ceiling"))
             elif self.path == "/settings":
                 go(apply_settings, one("mode"), one("cache_gb") or "0", one("reserve_pct") or "20")
             elif self.path == "/add" and one("link"):
@@ -2029,8 +2125,8 @@ SEARCH_CAP = 10000   # results counted (and cacheable at once) at most
 
 
 def file_state(h, path, off, size, tp, cached):
-    """(status, cached bytes) of one file. Status: cached, partial, not cached, or queued / caching (prefetch) and
-    downloading (pieces of it reached the cache in the last seconds)."""
+    """(status, cached bytes) of one file. Status: cached, partial, not cached, queued / caching / failed (a Cache
+    request) and downloading (pieces of it reached the cache in the last seconds)."""
     t, have = tp.get(h), 0
     present = total = 0
     if t and size > 0:
@@ -2041,12 +2137,16 @@ def file_state(h, path, off, size, tp, cached):
                 present += 1
         have = min(size, present * pl)
     with plock:
-        if path in prefetch["active"]:
+        if path in prefetch["active"] and not prefetch["active"][path]["cancel"]:
             return "caching", have
         if path in prefetch["queued"]:
             return "queued", have
     if total and present == total:
         return "cached", size
+    if path in prefetch["failed"]:
+        return "failed", have
+    if path in awake["paths"]:
+        return "waiting", have
     if any(f["path"] == path for f in activity["files"]):
         return "downloading", have
     return ("partial" if present else "not cached"), have
@@ -2069,20 +2169,95 @@ def search(q, limit=50, offset=0):
     finally:
         c.close()
     tp, cached = torrent_pieces(), set(cache_files())
+    reqs = requests_of(r[1] for r in rows)
     out = []
     for h, path, tpath, size, off in rows:
         st, have = file_state(h, path, off, size, tp, cached)
         out.append({"path": path, "size": size, "hash": h, "torrent_path": tpath, "cached": have, "status": st,
+                    "request": reqs.get(path),
                     "health": health.get(h), "health_text": health_text(h), "dead": looks_dead(h), **locations(path)})
     return {"query": q, "total": min(total, SEARCH_CAP), "total_capped": total > SEARCH_CAP, "total_size": total_size,
             "offset": offset, "results": out}
 
 
-# ---------------------------------------------------------------- prefetch ("add to cache"): read files through the mount
+# ---------------------------------------------------------------- cache requests ("Cache"): read files through the mount
 
 PREFETCH_WORKERS = 2
+REQUESTS = "/data/requests.db"   # every Cache request and its state (kept apart from the index, which can be rebuilt)
 plock = threading.Lock()
-prefetch = {"queue": collections.deque(), "queued": {}, "hash": {}, "active": {}, "done": 0, "failed": [], "bytes": 0}
+# A request is read through the mount once. If no data comes (no reachable seeder), it waits: its torrent is kept awake
+# with the pieces it needs (see waiter()) until they arrive or the request is cancelled; it never fails for that reason.
+# In memory: the queue (paths, in order), the reads in progress, and the failed requests (for the search's status);
+# the requests table holds the rest and lets the queue survive a restart
+prefetch = {"queue": collections.deque(), "queued": {}, "hash": {}, "active": {}, "done": 0, "failed": {}, "bytes": 0}
+
+
+def rdb():
+    c = sqlite3.connect(REQUESTS, timeout=30)
+    c.execute("PRAGMA journal_mode=WAL")
+    c.execute("CREATE TABLE IF NOT EXISTS requests(path TEXT PRIMARY KEY, hash TEXT, size INTEGER, state TEXT, created REAL, "
+              "updated REAL, seq INTEGER, attempts INTEGER DEFAULT 0, auto_retries INTEGER DEFAULT 0, error TEXT DEFAULT '', "
+              "retriable INTEGER DEFAULT 0, read INTEGER DEFAULT 0)")
+    c.execute("CREATE INDEX IF NOT EXISTS requests_state ON requests(state, updated)")
+    cols = {r[1] for r in c.execute("PRAGMA table_info(requests)")}
+    for col in ("waiting_since REAL", "arrived REAL"):   # added with the waiting state
+        if col.split()[0] not in cols:
+            c.execute(f"ALTER TABLE requests ADD COLUMN {col}")
+    # torrents of waiting requests: probes done and the next one (backoff), kept across restarts
+    c.execute("CREATE TABLE IF NOT EXISTS wait_torrents(hash TEXT PRIMARY KEY, probes INTEGER, next_probe REAL, last_probe REAL)")
+    # what the waiting torrents saw (how often a seeder shows up) and Distribyted's memory (to set the budget from data)
+    c.execute("CREATE TABLE IF NOT EXISTS wait_log(at REAL, hash TEXT, mode TEXT, peers INTEGER, seeders INTEGER, missing INTEGER)")
+    c.execute("CREATE TABLE IF NOT EXISTS mem_log(at REAL, rss INTEGER, awake INTEGER, listening INTEGER, listening_est INTEGER, "
+              "probing INTEGER, gentleman INTEGER)")
+    return c
+
+
+def req_set(path, **f):
+    f["updated"] = time.time()
+    c = rdb()
+    with c:
+        c.execute(f"UPDATE requests SET {', '.join(k + '=?' for k in f)} WHERE path=?", (*f.values(), path))
+    c.close()
+
+
+def load_requests():
+    """At start: queue again what was queued or being read when the service stopped, in the same order; forget finished
+    requests older than 30 days."""
+    c = rdb()
+    with c:
+        c.execute("DELETE FROM requests WHERE state IN ('done', 'cancelled') AND updated < ?", (time.time() - 30 * 86400,))
+        c.execute("DELETE FROM wait_log WHERE at < ?", (time.time() - 30 * 86400,))
+        c.execute("DELETE FROM mem_log WHERE at < ?", (time.time() - 30 * 86400,))
+        c.execute("UPDATE requests SET state='queued' WHERE state='caching'")
+        # before the waiting state, a request with no reachable seeder failed: it waits now
+        c.execute("UPDATE requests SET state='waiting', waiting_since=updated WHERE state='failed' AND retriable=1")
+    rows = c.execute("SELECT path, hash, size, state, error, updated, attempts, auto_retries FROM requests "
+                     "WHERE state IN ('queued', 'failed') ORDER BY seq").fetchall()
+    c.close()
+    with plock:
+        for p, h, n, st, err, at, att, auto in rows:
+            if st == "queued":
+                prefetch["queue"].append(p); prefetch["queued"][p] = n; prefetch["hash"][p] = h
+            else:
+                prefetch["failed"][p] = {"path": p, "error": err, "at": at, "attempts": att, "auto_retries": auto}
+    print(f"cache requests: {sum(1 for r in rows if r[3] == 'queued')} queued again, {sum(1 for r in rows if r[3] == 'failed')} failed")
+
+
+def enqueue(rows, manual=True):
+    """Queue (path, size, hash) rows, under plock. A manual request starts a fresh count of automatic retries."""
+    now = time.time()
+    c = rdb()
+    seq = (c.execute("SELECT max(seq) FROM requests").fetchone()[0] or 0) + 1
+    with c:
+        c.executemany("INSERT INTO requests(path, hash, size, state, created, updated, seq) VALUES (?,?,?,'queued',?,?,?) "
+                      "ON CONFLICT(path) DO UPDATE SET hash=excluded.hash, size=excluded.size, state='queued', "
+                      "updated=excluded.updated, seq=excluded.seq, read=0, arrived=NULL" + (", created=excluded.created, "
+                      "attempts=0, auto_retries=0, error='', waiting_since=NULL" if manual else ""),
+                      [(p, h, n, now, now, seq + k) for k, (p, n, h) in enumerate(rows)])
+    c.close()
+    for p, n, h in rows:
+        prefetch["queue"].append(p); prefetch["queued"][p] = n; prefetch["hash"][p] = h
+        prefetch["failed"].pop(p, None)
 
 
 def prefetch_add(q="", paths=()):
@@ -2101,23 +2276,59 @@ def prefetch_add(q="", paths=()):
         c.close()
     capmb = effective_cap_mb(load_settings())
     with plock:
-        new = [(p, n, h) for p, n, h in rows if p not in prefetch["queued"] and p not in prefetch["active"]]
+        waiting = waiting_paths()
+        new = [(p, n, h) for p, n, h in rows if p not in prefetch["queued"] and p not in prefetch["active"] and p not in waiting]
         size = sum(n for _, n, _ in new)
         if size + sum(prefetch["queued"].values()) > capmb * 1e6 * 0.9:
             return {"error": f"{mb(size)} is more than the cache can hold ({mb(capmb * 1e6)}): nothing queued", "size": size}
-        for p, n, h in new:
-            prefetch["queue"].append(p); prefetch["queued"][p] = n; prefetch["hash"][p] = h
+        enqueue(new)
     dead = sum(1 for _, _, h in new if looks_dead(h))
     return {"queued": len(new), "size": size, "already": len(rows) - len(new), "no_peer": dead}
 
 
-def prefetch_cancel():
+def waiting_paths():
+    c = rdb()
+    try:
+        return {p for p, in c.execute("SELECT path FROM requests WHERE state='waiting'")}
+    finally:
+        c.close()
+
+
+def prefetch_cancel(paths=None):
+    """Cancel the given requests (queued, being read, waiting or failed), or every queued, running and waiting one
+    when paths is None. A waiting request cancelled lets its torrent sleep."""
     with plock:
-        n = len(prefetch["queue"])
-        prefetch["queue"].clear(); prefetch["queued"].clear(); prefetch["hash"].clear()
-        for a in prefetch["active"].values():
-            a["cancel"] = True
+        waiting = waiting_paths()
+        if paths is None:
+            paths = list(prefetch["queue"]) + list(prefetch["active"]) + list(waiting)
+        n = 0
+        for p in paths:
+            if p in waiting:
+                n += 1
+                continue
+            if p in prefetch["queued"]:
+                prefetch["queue"].remove(p); prefetch["queued"].pop(p); prefetch["hash"].pop(p, None)
+            elif p in prefetch["active"]:
+                prefetch["active"][p]["cancel"] = True
+            elif not prefetch["failed"].pop(p, None):
+                continue
+            n += 1
+        c = rdb()
+        with c:
+            c.executemany("UPDATE requests SET state='cancelled', updated=? WHERE path=? AND state IN ('queued', 'caching', 'waiting', 'failed')",
+                          [(time.time(), p) for p in paths])
+        c.close()
+    waiter_wake.set()
     return {"cancelled": n}
+
+
+def prefetch_retry(paths=None):
+    """Queue failed or cancelled requests again (all failed ones when paths is None). A waiting request is not
+    queued again: its torrent is already kept awake for it."""
+    if paths is None:
+        with plock:
+            paths = list(prefetch["failed"])
+    return prefetch_add(paths=paths)
 
 
 def prefetch_worker():
@@ -2130,10 +2341,13 @@ def prefetch_worker():
                                                   "hash": prefetch["hash"].pop(path, ""), "since": time.time()}
         if not path:
             time.sleep(1); continue
-        ok, err = False, ""
-        if path.startswith("/") or ".." in path.split("/"):   # a torrent can name its files anything: stay in the mount
+        req_set(path, state="caching")
+        ok, err, retriable = False, "", False
+        refused = path.startswith("/") or ".." in path.split("/")   # a torrent can name its files anything: stay in the mount
+        if refused:
             err, job["cancel"] = "refused: path leaves the share", True
-        for attempt in range(0 if job["cancel"] else 3):   # a read can time out (no peer yet) or fail during a restart
+        waiting = False
+        for attempt in range(0 if job["cancel"] else 3):   # a read can fail during a restart: try again
             # a restart is not a failure: wait (up to 5 minutes) until the service runs and the mount answers again
             for _ in range(150):
                 if job["cancel"] or (state["state"] == "running" and os.path.isdir(os.path.join(MOUNT, path.split("/", 1)[0]))):
@@ -2152,25 +2366,304 @@ def prefetch_worker():
             except OSError as e:
                 if e.errno == 5 and state["state"] == "running":   # Distribyted's answer to a read that got no data in time
                     err = (f"no data from peers within the read timeout ({os.environ.get('ATHENAFS_READ_TIMEOUT') or 60} s): "
-                           f"the torrent seems to have no reachable seeder ({health_text(job['hash'])})")
+                           f"no reachable seeder when asked ({health_text(job['hash'])})")
+                    waiting = True
+                    break   # no point reading again now: the torrent is kept awake and waits for a peer instead
                 else:
-                    err = str(e)
+                    err, retriable = str(e), e.errno != 2   # a file gone from the share will not come back by itself
                 time.sleep(5)
+        failed = refused or not ok and not job["cancel"] and not waiting
+        waiting = waiting and not job["cancel"]
         with plock:
             prefetch["active"].pop(path, None)
             prefetch["bytes"] += job["read"]
             if ok:
                 prefetch["done"] += 1
-            elif not job["cancel"] or err:
-                prefetch["failed"] = (prefetch["failed"] + [{"path": path, "error": err, "at": time.time()}])[-20:]
+            elif failed:
+                prefetch["failed"][path] = {"path": path, "error": err, "at": time.time()}
+        try:
+            if waiting:
+                c = rdb()
+                with c:
+                    c.execute("UPDATE requests SET state='waiting', error=?, read=?, attempts=attempts+1, updated=?, "
+                              "waiting_since=coalesce(waiting_since, ?) WHERE path=?", (err, job["read"], time.time(), time.time(), path))
+                c.close()
+                waiter_wake.set()
+                continue
+            if ok:
+                req_set(path, state="done", read=job["read"], error="")
+            elif failed:
+                c = rdb()
+                with c:
+                    c.execute("UPDATE requests SET state='failed', error=?, retriable=?, read=?, attempts=attempts+1, updated=? "
+                              "WHERE path=?", (err, int(retriable), job["read"], time.time(), path))
+                c.close()
+            else:
+                req_set(path, state="cancelled", read=job["read"])
+        except sqlite3.Error as e:
+            print("cache requests:", e)
 
 
 def prefetch_view():
     with plock:
+        failed = sorted(prefetch["failed"].values(), key=lambda f: f["at"])
         return {"queued": len(prefetch["queue"]), "queued_size": sum(prefetch["queued"].values()),
                 "active": [{k: v for k, v in a.items() if k != "cancel"} for a in prefetch["active"].values()],
-                "done": prefetch["done"], "failed": list(prefetch["failed"]), "bytes_read": prefetch["bytes"]}
+                "done": prefetch["done"], "failed": len(failed), "failed_recent": failed[-3:], "bytes_read": prefetch["bytes"]}
 
+
+def requests_of(paths):
+    """{path: request} for the given share paths that have one."""
+    out, paths = {}, list(paths)
+    c = rdb()
+    try:
+        for k in range(0, len(paths), 500):
+            chunk = paths[k:k + 500]
+            for r in c.execute(f"SELECT path, state, created, updated, attempts, error, read, waiting_since, arrived FROM requests "
+                               f"WHERE path IN ({','.join('?' * len(chunk))})", chunk):
+                out[r[0]] = dict(zip(("path", "state", "created", "updated", "attempts", "error", "read", "waiting_since", "arrived"), r))
+    finally:
+        c.close()
+    with plock:
+        for p, r in out.items():
+            if p in prefetch["active"]:
+                r["read"] = prefetch["active"][p]["read"]
+    return out
+
+
+REQUEST_FILTERS = {"all": None, "open": ("queued", "caching"), "waiting": ("waiting",), "failed": ("failed",), "done": ("done",),
+                   "cancelled": ("cancelled",)}
+
+
+def requests_view(which="all", limit=50, offset=0):
+    """Cache requests, most recently changed first (open ones: in queue order), with counts per state."""
+    limit, offset = max(1, min(int(limit), 500)), max(0, int(offset))
+    if which not in REQUEST_FILTERS:
+        return {"error": "state must be one of " + ", ".join(REQUEST_FILTERS)}
+    states = REQUEST_FILTERS[which]
+    where = f"WHERE state IN ({','.join('?' * len(states))})" if states else ""
+    order = {"open": "CASE state WHEN 'caching' THEN 0 ELSE 1 END, seq", "waiting": "waiting_since"}.get(which, "updated DESC")
+    c = rdb()
+    try:
+        counts = dict(c.execute("SELECT state, count(*) FROM requests GROUP BY state").fetchall())
+        total = c.execute(f"SELECT count(*) FROM requests {where}", states or ()).fetchone()[0]
+        rows = c.execute(f"SELECT path, hash, size, state, created, updated, attempts, error, read, waiting_since, arrived "
+                         f"FROM requests {where} ORDER BY {order} LIMIT ? OFFSET ?", (*(states or ()), limit, offset)).fetchall()
+    finally:
+        c.close()
+    keys = ("path", "hash", "size", "state", "created", "updated", "attempts", "error", "read", "waiting_since", "arrived")
+    out = []
+    with plock:
+        active = {p: dict(a) for p, a in prefetch["active"].items()}
+    for r in rows:
+        x = dict(zip(keys, r))
+        if x["path"] in active:
+            x["read"], x["since"] = active[x["path"]]["read"], active[x["path"]]["since"]
+        if x["state"] == "waiting":
+            w = awake["torrents"].get(x["hash"])   # how its torrent waits: kept awake, probed, or asleep until its next probe
+            x["wait"] = {k: v for k, v in w.items() if k != "ranges"} if w else None
+        x.update(health_text=health_text(x["hash"]), dead=looks_dead(x["hash"]), **locations(x["path"]))
+        out.append(x)
+    return {"state": which, "counts": {s: counts.get(s, 0) for s in ("queued", "caching", "waiting", "failed", "done", "cancelled")},
+            "total": total, "offset": offset, "results": out}
+
+
+
+# ---------------------------------------------------------------- waiting requests: torrents kept awake for them
+
+WANTED_FILE = "/data/wanted.json"     # read by Distribyted every 30 s: torrents to hold awake and the pieces they need
+PROBE_STEPS = (900, 1800, 3600, 7200)  # s between probes of a torrent left out of the budget: 15 min, 30, 1 h, then 2 h
+PROBE_WINDOW = 600     # s a probe keeps its torrent awake (finding peers on the DHT and the trackers takes minutes)
+PROBES_AT_ONCE = 2
+SHED_PAUSE = 1500      # s between two torrents put to sleep above the ceiling: one sleeps after the idle delay (600 s),
+                       # then Go returns its memory over about 10 min (measured 2026-10-23)
+# what the waiter decided last, for the page, the API and plan_gentleman
+awake = {"torrents": {}, "paths": set(), "listening_cost": 0, "rss": 0, "over": False, "calm": True, "last_shed": 0,
+         "drop_gentle": None, "at": 0}
+waiter_wake = threading.Event()
+
+
+def distribyted_rss():
+    p = state.get("proc")
+    try:
+        for line in open(f"/proc/{p.pid}/status"):
+            if line.startswith("VmRSS:"):
+                return int(line.split()[1]) * 1024
+    except (OSError, AttributeError, ValueError):
+        pass
+    return 0
+
+
+def awake_limits(st):
+    """(budget for the torrents kept awake by choice, ceiling of Distribyted's real memory), in bytes."""
+    return int(st["awake_mem_mb"]) * 1_000_000, int(st["memory_ceiling_mb"]) * 1_000_000
+
+
+def merge_ranges(rs):
+    out = []
+    for b, e in sorted(rs):
+        if out and b <= out[-1][1]:
+            out[-1][1] = max(out[-1][1], e)
+        else:
+            out.append([b, e])
+    return out
+
+
+def plan_waiting(log=False):
+    """Waiting requests whose pieces are all in the cache are done. The torrents of the others are kept awake with the
+    pieces they need (listening) while their estimated memory fits the budget shared with gentleman mode, cheapest
+    first (the most requests for the memory); the rest are probed: woken PROBE_WINDOW s with backoff, or at once when a
+    health check or a scrape finds a seeder. Above the ceiling of Distribyted's real memory, nothing new is woken and,
+    one at a time, a gentleman slot then the largest listening torrent is put back to sleep."""
+    now = time.time(); st = load_settings(); budget, ceiling = awake_limits(st)
+    c = rdb()
+    reqs = c.execute("SELECT path, hash, waiting_since FROM requests WHERE state='waiting'").fetchall()
+    probes = {h: (n, nx, lp) for h, n, nx, lp in c.execute("SELECT hash, probes, next_probe, last_probe FROM wait_torrents")}
+    c.close()
+    tp, cached = torrent_pieces(), set(cache_files())
+    loc = {}
+    d = db()
+    try:
+        for k in range(0, len(reqs), 500):
+            chunk = [r[0] for r in reqs[k:k + 500]]
+            for p, h, off, size in d.execute(f"SELECT path, hash, off, size FROM files WHERE path IN ({','.join('?' * len(chunk))})", chunk):
+                loc[p] = (h, off, size)
+    finally:
+        d.close()
+    need, done, gone = {}, [], []
+    for p, h, since in reqs:
+        t, l = tp.get(h), loc.get(p)
+        if not t or not l:
+            gone.append(p); continue
+        pl = t["pl"]
+        b, e = l[1] // pl, (l[1] + max(l[2], 1) - 1) // pl + 1
+        missing = sum(1 for i in range(b, e) if piece(t, i) not in cached)
+        if not missing:
+            done.append(p); continue
+        x = need.setdefault(h, {"ranges": [], "missing": 0, "since": since or now, "requests": 0})
+        x["ranges"].append((b, e)); x["missing"] += missing; x["requests"] += 1; x["since"] = min(x["since"], since or now)
+    if done or gone:
+        c = rdb()
+        with c:
+            c.executemany("UPDATE requests SET state='done', arrived=?, updated=?, error='' WHERE path=? AND state='waiting'",
+                          [(now, now, p) for p in done])
+            c.executemany("UPDATE requests SET state='failed', error='no longer in the share', updated=? WHERE path=? AND state='waiting'",
+                          [(now, p) for p in gone])
+        c.close()
+        with plock:
+            for p in gone:
+                prefetch["failed"][p] = {"path": p, "error": "no longer in the share", "at": now}
+        if done:
+            print(f"cache requests: {len(done)} waiting request(s) arrived")
+
+    cost = {h: tp[h]["npieces"] * BYTES_PER_AWAKE_PIECE for h in need}
+    rss = distribyted_rss()
+    over, calm = rss > ceiling, rss < 0.9 * ceiling   # between the two: keep what is awake, wake nothing new
+    prev = awake["torrents"]
+    was_listening = {h for h, x in prev.items() if x["mode"] == "listening"}
+    if over and now - awake["last_shed"] > SHED_PAUSE:
+        gs = load_gentle_state().get("slots", {})
+        if gs:   # gentleman slots go first
+            awake["drop_gentle"] = max(gs, key=lambda k: gs[k]["since"])
+            print(f"memory: Distribyted uses {mb(rss)} (ceiling {mb(ceiling)}): gentleman slot {awake['drop_gentle'][:8]} released")
+        elif was_listening:
+            h = max(was_listening, key=lambda k: cost.get(k, 0))
+            was_listening.discard(h)
+            print(f"memory: Distribyted uses {mb(rss)} (ceiling {mb(ceiling)}): {h[:8]} stops listening, probed instead")
+        awake["last_shed"] = now
+    listening, left, room = [], budget, 0.9 * ceiling - rss
+    for h in sorted(need, key=lambda h: (h not in was_listening, cost[h], need[h]["since"])):
+        if cost[h] > left:
+            continue
+        if h in was_listening:
+            listening.append(h); left -= cost[h]
+        elif calm and cost[h] <= room:
+            listening.append(h); left -= cost[h]; room -= cost[h]
+    # a probe runs until its last_probe time (kept in the table, so a restart does not cut it short)
+    probing = [h for h in need if h not in listening and probes.get(h, (0, 0, 0))[2] > now][:PROBES_AT_ONCE]
+    sw = swarm_info()
+    newp = {}
+    for h in sorted(need, key=lambda h: probes.get(h, (0, 0, 0))[1]):
+        if h in listening or h in probing:
+            continue
+        n, nx, lp = probes.get(h, (0, need[h]["since"] + PROBE_STEPS[0], 0))
+        hl, s_ = health.get(h) or {}, sw.get(h) or {}
+        signal = (hl.get("seeders") and hl.get("checked", 0) > lp) or (s_.get("seeders") and s_.get("checked", 0) > lp)
+        if (now >= nx or signal) and len(probing) < PROBES_AT_ONCE and calm and cost[h] <= room:
+            probing.append(h); room -= cost[h]
+            n += 1; lp = now + PROBE_WINDOW; nx = lp + PROBE_STEPS[min(n, len(PROBE_STEPS) - 1)]
+            print(f"cache requests: probing {h[:8]} for {PROBE_WINDOW // 60} min ({'a seeder was reported' if signal else f'probe {n}'})")
+        newp[h] = (n, nx, lp)
+    c = rdb()
+    with c:
+        c.execute(f"DELETE FROM wait_torrents WHERE hash NOT IN ({','.join('?' * len(need))})", list(need))
+        c.executemany("INSERT OR REPLACE INTO wait_torrents VALUES (?,?,?,?)", [(h, *v) for h, v in newp.items()])
+    c.close()
+
+    peers = {x["hash"]: x for x in activity.get("torrents") or []}
+    torrents = {}
+    for h, x in need.items():
+        n, nx, lp = newp.get(h, probes.get(h, (0, 0, 0)))
+        mode = "listening" if h in listening else "probing" if h in probing else "sleeping"
+        torrents[h] = {"hash": h, "name": tp[h]["name"], "mode": mode, "requests": x["requests"], "missing_pieces": x["missing"],
+                       "waiting_since": x["since"], "memory_estimate": cost[h], "probes": n, "next_probe": nx if mode == "sleeping" else None,
+                       "until": lp if mode == "probing" else None,
+                       "peers": peers.get(h, {}).get("peers", 0), "seeders": peers.get(h, {}).get("seeders", 0), "ranges": merge_ranges(x["ranges"])}
+    with open(WANTED_FILE + ".tmp", "w") as f:
+        json.dump({"torrents": [{"hash": h, "pieces": torrents[h]["ranges"]} for h in listening + probing]}, f)
+    os.replace(WANTED_FILE + ".tmp", WANTED_FILE)
+    listening_cost = sum(cost[h] for h in listening)
+    changed = listening_cost != awake["listening_cost"] or calm != awake["calm"] or awake["drop_gentle"] or \
+        set(need) != set(prev)
+    with plock:
+        paths = {p for p, h, _ in reqs if h in need and p not in done}
+    awake.update(torrents=torrents, paths=paths, listening_cost=listening_cost, rss=rss, over=over, calm=calm, at=now,
+                 budget=budget, ceiling=ceiling)
+    if changed:
+        plan_gentleman()   # its budget is what the waiting torrents leave
+        awake["drop_gentle"] = None
+    if log:
+        gs = load_gentle_state().get("slots", {})
+        nawake = sum(1 for x in (served.get("data") or {}).get("sources", []) if x.get("awake"))
+        c = rdb()
+        with c:
+            c.executemany("INSERT INTO wait_log VALUES (?,?,?,?,?,?)",
+                          [(now, h, x["mode"], x["peers"], x["seeders"], x["missing_pieces"]) for h, x in torrents.items()])
+            c.execute("INSERT INTO mem_log VALUES (?,?,?,?,?,?,?)", (now, rss, nawake, len(listening), listening_cost, len(probing), len(gs)))
+        c.close()
+
+
+def waiter():
+    last_log = 0
+    time.sleep(60)   # let the start-up settle
+    while True:
+        try:
+            if state["state"] == "running":
+                lg = time.time() - last_log >= 300
+                plan_waiting(log=lg)
+                if lg:
+                    last_log = time.time()
+        except Exception as e:
+            print("waiter:", e)
+        waiter_wake.wait(30); waiter_wake.clear()
+
+
+def awake_view():
+    """The torrents kept awake by choice: waiting requests (listening or probed) and gentleman slots, with the budget,
+    the ceiling and Distribyted's memory now and over the last 24 h."""
+    c = rdb()
+    try:
+        mem = c.execute("SELECT at, rss, awake, listening, listening_est, probing, gentleman FROM mem_log WHERE at > ? ORDER BY at",
+                        (time.time() - 86400,)).fetchall()
+    finally:
+        c.close()
+    g = gentleman_view()
+    return {"rss": awake["rss"], "budget": awake.get("budget", 0), "ceiling": awake.get("ceiling", 0), "over_ceiling": awake["over"],
+            "waking_allowed": awake["calm"], "listening_estimate": awake["listening_cost"],
+            "gentleman_estimate": sum(x["memory_estimate"] for x in g["helped"]),
+            "waiting": [{k: v for k, v in x.items() if k != "ranges"} for x in sorted(awake["torrents"].values(), key=lambda x: x["waiting_since"])],
+            "probe_steps": PROBE_STEPS, "probe_window": PROBE_WINDOW,
+            "memory_log": [dict(zip(("at", "rss", "awake", "listening", "listening_estimate", "probing", "gentleman"), r)) for r in mem]}
 
 
 # ---------------------------------------------------------------- per folder: ready view, visibility in the share
@@ -2451,36 +2944,50 @@ def load_gentle_state():
         return {"slots": {}, "released": {}}
 
 
+def gentle_memory(st):
+    """Memory left to gentleman mode: the shared budget minus what waiting cache requests keep awake."""
+    return max(0, awake_limits(st)[0] - awake["listening_cost"])
+
+
 def slots_over_memory(slots, st, h):
-    """True for the slots that no longer fit the memory budget (it was lowered): the most recent ones go first."""
+    """True for the slots that no longer fit the memory left to gentleman mode: the most recent ones go first."""
     tp = torrent_pieces()
     total = 0
     for k in sorted(slots, key=lambda k: slots[k]["since"]):
         total += tp[k]["npieces"] * BYTES_PER_AWAKE_PIECE if k in tp else 0
         if k == h:
-            return total > int(st["gentle_mem_mb"]) * 1e6
+            return total > gentle_memory(st)
     return False
 
 
+gentle_lock = threading.Lock()
+
+
 def plan_gentleman():
-    """Choose the torrents to help and write the list Distribyted reads."""
+    with gentle_lock:   # called by the gentleman loop and by the waiter
+        return plan_gentleman_locked()
+
+
+def plan_gentleman_locked():
+    """Choose the torrents to help and write the list Distribyted reads. Torrents of waiting cache requests are left
+    to the waiter (they need the normal cache); above the memory ceiling no slot is added, and the waiter names one to drop."""
     st = load_settings(); gs = load_gentle_state(); sw = swarm_info(); now = time.time()
     slots = gs.get("slots", {}); released = {h: t for h, t in gs.get("released", {}).items() if now - t < 86400}
     known = {source_hash(x) for x in load_sources()}
     for h in list(slots):   # leave the slot: enough seeders again, 24 h passed, or the torrent is gone
         x = sw.get(h, {})
         if (h not in known or x.get("seeders", 0) >= 3 or now - slots[h]["since"] > 86400 or not st["gentle_on"]
-                or slots_over_memory(slots, st, h)):
+                or slots_over_memory(slots, st, h) or h in awake["torrents"] or h == awake["drop_gentle"]):
             slots.pop(h); released[h] = now
-    if st["gentle_on"]:
-        cands = sorted((h for h, x in sw.items() if h in known and h not in slots and h not in released
+    if st["gentle_on"] and awake["calm"]:
+        cands = sorted((h for h, x in sw.items() if h in known and h not in slots and h not in released and h not in awake["torrents"]
                         and 1 <= x["seeders"] <= 2 and x["leechers"] >= 1),
                        key=lambda h: -sw[h]["leechers"] / sw[h]["seeders"])
         # memory budget: an awake torrent costs about BYTES_PER_AWAKE_PIECE per piece (a 30 TB torrent of 475,000 pieces:
         # 1.6 GB); take candidates in order while they fit, skip the ones too large for what is left
         tp = torrent_pieces()
         cost = lambda h: tp[h]["npieces"] * BYTES_PER_AWAKE_PIECE if h in tp else 0
-        left = int(st["gentle_mem_mb"]) * 1e6 - sum(cost(h) for h in slots)
+        left = gentle_memory(st) - sum(cost(h) for h in slots)
         for h in cands:
             if len(slots) >= int(st["gentle_slots"]):
                 break
@@ -2515,22 +3022,49 @@ def gentleman_loop():
         time.sleep(600)
 
 
-def apply_gentleman(on, slots, pct, upload_kbps, mem_mb):
+def apply_gentleman(on, slots, pct, upload_kbps):
     """Validate and apply the gentleman settings and the upload cap (restarts the service)."""
     try:
-        slots, pct, up, mem = int(slots), float(pct), int(float(upload_kbps)), int(float(mem_mb))
+        slots, pct, up = int(slots), float(pct), int(float(upload_kbps))
     except ValueError:
         state["message"] = "invalid number: settings unchanged"; return
-    if not (0 <= slots <= 20 and 0 <= pct <= 50 and 0 <= up <= 1_000_000 and 0 <= mem <= 64000):
-        state["message"] = "slots 0-20, space 0-50 %, memory 0-64000 MB, upload 0-1000000 kB/s: settings unchanged"; return
-    new = dict(load_settings(), gentle_on=bool(on), gentle_slots=slots, gentle_pct=pct, upload_kbps=up, gentle_mem_mb=mem)
+    if not (0 <= slots <= 20 and 0 <= pct <= 50 and 0 <= up <= 1_000_000):
+        state["message"] = "slots 0-20, space 0-50 %, upload 0-1000000 kB/s: settings unchanged"; return
+    new = dict(load_settings(), gentle_on=bool(on), gentle_slots=slots, gentle_pct=pct, upload_kbps=up)
 
     def job():
         save_settings(new)
         plan_gentleman()
-        return (f"gentleman mode {'on' if on else 'off'} ({slots} slot(s), {pct:g} % of the cache cap, {mem} MB of memory); "
+        return (f"gentleman mode {'on' if on else 'off'} ({slots} slot(s), {pct:g} % of the cache cap); "
                 f"upload cap {'none' if not up else str(up) + ' kB/s'}")
     exclusive(job)
+
+
+def apply_awake(mem_mb, ceiling_mb):
+    """Memory budget of the torrents kept awake and ceiling of Distribyted's memory: no restart, the waiter applies them."""
+    try:
+        mem, ceil = int(float(mem_mb)), int(float(ceiling_mb))
+    except ValueError:
+        state["message"] = "invalid number: settings unchanged"; return
+    if not (0 <= mem <= 64000 and 1000 <= ceil <= 256000):
+        state["message"] = "budget 0-64000 MB, ceiling 1000-256000 MB: settings unchanged"; return
+    save_settings(dict(load_settings(), awake_mem_mb=mem, memory_ceiling_mb=ceil))
+    state["message"] = (f"torrents kept awake: {mem} MB estimated at most; Distribyted's memory ceiling: {ceil} MB "
+                        "(Go's own memory limit follows it at the next restart)")
+    waiter_wake.set()
+
+
+def request_badges():
+    """(requests waiting, waiting requests that arrived in the last 24 h) for the header."""
+    try:
+        c = rdb()
+        try:
+            return (c.execute("SELECT count(*) FROM requests WHERE state='waiting'").fetchone()[0],
+                    c.execute("SELECT count(*) FROM requests WHERE state='done' AND arrived > ?", (time.time() - 86400,)).fetchone()[0])
+        finally:
+            c.close()
+    except sqlite3.Error:
+        return 0, 0
 
 
 def activity_view():
@@ -2581,6 +3115,7 @@ def watchdog():
 
 def main():
     load_health()
+    load_requests()
     start()
     threading.Thread(target=watchdog, daemon=True).start()
     threading.Thread(target=sampler, daemon=True).start()
@@ -2590,6 +3125,7 @@ def main():
     threading.Thread(target=gentleman_loop, daemon=True).start()
     for _ in range(PREFETCH_WORKERS):
         threading.Thread(target=prefetch_worker, daemon=True).start()
+    threading.Thread(target=waiter, daemon=True).start()
     srv = http.server.ThreadingHTTPServer(("0.0.0.0", 8080), H)
     signal.signal(signal.SIGTERM, lambda *a: (stop(), os._exit(0)))
     srv.serve_forever()
