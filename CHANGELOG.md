@@ -10,7 +10,11 @@ with `.env.example`, then `sh scripts/up.sh` (it rebuilds).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-23
+
 ### Added
+- `scripts/smoke-image.sh`: smoke test of a core image on any Docker host (start, a public-domain torrent mounted, a
+  file read twice), used to check the arm64 image on an Apple Silicon Mac.
 - Published images: on each version tag, the CI builds `ghcr.io/konni-arcadia/athenafs-core` and `athenafs-smb` for
   amd64 and arm64 on native runners, with a signed build provenance attestation; each image carries the GPL text, a
   NOTICE pointing to its sources, and the commit it was built from. `scripts/up.sh` downloads them on a clean checkout of
