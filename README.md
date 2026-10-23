@@ -216,6 +216,7 @@ smb/                      Samba container
 scripts/up.sh down.sh     start and stop (host mount point, commit of the build, stale mounts)
 scripts/measure.sh        measurement of the running commit (with measure_dataset.py)
 scripts/measure-upload.sh traffic under upload caps (tc), used for the early tests
+scripts/smoke-image.sh    smoke test of a core image on any Docker host (Docker Desktop on a Mac included)
 experiments/btfs/         the rejected first candidate, kept for the record
 docs/findings.md          what was measured and why things are the way they are
 docs/measurements.md      one row of measurements per commit
