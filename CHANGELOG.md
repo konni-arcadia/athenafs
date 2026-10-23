@@ -9,9 +9,6 @@ with `.env.example`, then `sh scripts/up.sh` (it rebuilds).
 
 ## [Unreleased]
 
-**History rewritten on 2026-10-23:** every commit id changed (the ids quoted here and in `docs/` were updated). A clone
-made before that date must be cloned again; pulling into it would mix the two histories.
-
 ### Added
 - Cache requests are kept (bacc05f): every "Cache" is a row of `/data/requests.db` (queued, caching, waiting, done,
   failed, cancelled) and the queue resumes after a restart. A file that gets no data **waits for a seeder** for as long

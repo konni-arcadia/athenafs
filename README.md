@@ -212,6 +212,8 @@ experiments/btfs/         the rejected first candidate, kept for the record
 docs/findings.md          what was measured and why things are the way they are
 docs/measurements.md      one row of measurements per commit
 CHANGELOG.md              notable changes, and what to check when upgrading
+CONTRIBUTING.md SECURITY.md  how to report a bug, propose a change, report a vulnerability
+.github/workflows/        secret scan of the history on each push and pull request
 data/                     runtime data, not in git: torrents/ (optional .torrent files), state/, mount/
 ```
 
@@ -226,6 +228,10 @@ data/                     runtime data, not in git: torrents/ (optional .torrent
   previews and thumbnails were not, and a preview that reads a file wakes its torrent.
 - Nothing can be pinned in the cache: the oldest pieces leave first when the cap is reached.
 - The patches to Distribyted are local; they are not proposed upstream.
+
+## Contributing
+Issues and pull requests are welcome: see `CONTRIBUTING.md`. Security issues: `SECURITY.md` (private reporting, not a
+public issue).
 
 ## Licence
 Copyright the athenafs contributors. GNU General Public License version 3 or (at your option) any later version
