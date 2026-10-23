@@ -10,6 +10,7 @@ Torrents as a read-only network folder (patched Distribyted + supervisor/web pag
   machine names, addresses or secrets. Test credentials (`tor` / `rent`) are the one deliberate default.
 - Write for a reader who is not the owner: no private hostnames, no home-network IP addresses in committed files.
 - Commit only when asked. Pushing to GitHub is outward-facing: ask first.
+- If `local/RULES.md` exists, read it before working and follow it.
 
 ## Working here
 - Start and stop with `sh scripts/up.sh` / `sh scripts/down.sh`. They prepare the host mount point (bind mount of itself with
