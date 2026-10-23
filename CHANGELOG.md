@@ -1,13 +1,17 @@
 # Changelog
 
 Notable changes, newest first. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
-[Semantic Versioning](https://semver.org/) once the first one is tagged. Each entry names the commits; measurements per
-commit are in `docs/measurements.md`, the reasons and tests behind each change in `docs/findings.md`.
+[Semantic Versioning](https://semver.org/) (in 0.x, a minor version may change settings or behaviour: read "Changed").
+Each entry names the commits; measurements per commit are in `docs/measurements.md`, the reasons and tests behind each
+change in `docs/findings.md`.
 
 **Upgrading:** read the "Settings" and "Changed" lines of every version between yours and the new one, compare your `.env`
 with `.env.example`, then `sh scripts/up.sh` (it rebuilds).
 
 ## [Unreleased]
+
+## [0.1.0] - 2026-10-23
+First release. Everything below, since the initial commit.
 
 ### Added
 - Cache requests are kept (bacc05f): every "Cache" is a row of `/data/requests.db` (queued, caching, waiting, done,
