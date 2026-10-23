@@ -395,6 +395,23 @@ case over SMB (copy first, then extract locally), a real torrent with sub-folder
 - Trap found during the tests: a `docker compose up` run without the data directory variable made Docker create empty
   directories at the host root; the compose file now has a default for `DATA`.
 
+**Where to pick up (2026-10-23, after a long session; read this first):**
+- Running: commit `1ec26ae` (code `cf22e0a`), 1051 sources (1040 mounted, 11 without metadata), ready view
+  `BigCollection_READY` on, gentleman mode on with 3 slots (`dde7a316`, `363d8498` since 2026-10-22 18:00 UTC,
+  `32f20bd8` since 18:18 UTC). Nothing needs this session: service, health checks and gentleman mode run on their own.
+- Next, in this order:
+  1. Gentleman mode: understand "pieces held > pieces asked for" (`torrent/gentleman.go` in `core/patches/gentleman.patch`:
+     `Complete` counts every complete piece of the torrent, `Wanted` the ones set to normal priority; check whether the
+     client fetches more, e.g. through the readahead of a reader or the first-piece request) and the memory growth of
+     helped torrents over hours (measure Distribyted's RSS against the pieces and peers of each helped torrent).
+  2. Check the first rotation: slots end after 24 h (from about 2026-10-23 18:00 UTC) or at 3 seeders; released torrents
+     must cancel their requests, sleep, and stay out for 24 h (`/data/gentleman_state.json`, `GET /api/gentleman`).
+  3. Release `v0.1.0`: pinned builds and `CHANGELOG.md` are done; tag and GitHub release left (ask before pushing a tag).
+  4. Ideas below (WebDAV mode, AppArmor, Windows test, patches upstream).
+- How to check the state: `curl -s localhost:8080/api/status`, `/api/gentleman`, `/api/folders`; Distribyted's memory:
+  `docker exec athenafs-core sh -c 'grep VmRSS /proc/$(pidof distribyted)/status'`. Measure with `scripts/measure.sh`
+  after committing (see CLAUDE.md).
+
 Open points (2026-10-22):
 - **Release, stage 1:** done: base images pinned by digest, Distribyted by commit, `CHANGELOG.md`. Left: tag `v0.1.0` and
   a GitHub release. The `apk` and `apt` packages installed during the build are not pinned. Stage 2
@@ -487,6 +504,13 @@ Open points (2026-10-22):
     (none before), 115 to 463 rarest pieces were asked for each, 470 MB had arrived in the gentleman cache, nothing
     uploaded yet. But Distribyted grew from about 3.4 to 6.0 GB: an awake torrent costs about **3.5 kB of memory per
     piece** (2.6 GB for these 753,000 pieces), so the "20 MB per awake torrent" average of small torrents does not hold.
+  - **After 8.6 hours (2026-10-23 morning, commit cf22e0a):** 14.4 GB uploaded in all (1.7, 6.1 and 6.6 GB for
+    `dde7a316`, `363d8498`, `32f20bd8`); gentleman cache 21.3 GB of 23 GB; two of the three now show 0 seeders and 581 and
+    13 leechers at the trackers, so the rare pieces held here may be among the only copies left. **Not understood yet:**
+    two torrents hold more pieces than were asked for (780 and 549 for 455): the client downloads beyond the pieces set
+    to normal priority, or the "held" count includes pieces it should not; the separate cache caps the space, but the
+    budget logic depends on it. **Memory creeps up:** Distribyted 4.1 GB at the measurement, 5.5 GB 8 hours later, CPU 21 %
+    (three torrents talking to 1 to 46 peers continuously); not covered by the 3.5 kB per piece estimate.
   - **Memory budget** (`ATHENAFS_GENTLEMAN_MEMORY_MB`, 1000 by default, on the page): candidates are taken in order of
     priority while their estimated cost (pieces x 3.5 kB) fits; a torrent too large for what is left is skipped. Lowering
     the budget releases the most recent slots that no longer fit. The 3 slots stay a maximum.
