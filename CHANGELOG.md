@@ -9,7 +9,25 @@ with `.env.example`, then `sh scripts/up.sh` (it rebuilds).
 
 ## [Unreleased]
 
+**History rewritten on 2026-10-23:** every commit id changed (the ids quoted here and in `docs/` were updated). A clone
+made before that date must be cloned again; pulling into it would mix the two histories.
+
 ### Added
+- Cache requests are kept (bacc05f): every "Cache" is a row of `/data/requests.db` (queued, caching, waiting, done,
+  failed, cancelled) and the queue resumes after a restart. A file that gets no data **waits for a seeder** for as long
+  as needed instead of failing: its torrent is kept awake with the pieces it needs, with no file open (Distribyted patch
+  `wanted`), or, when the memory budget is used, woken 10 minutes after 15 min, 30, 1 h, then every 2 h, and at once
+  when a health check or the trackers report a seeder. Page: a "Cache requests" section (states, Cancel, Retry), header
+  badges (waiting, arrived in the last 24 h). API: `GET /api/requests`, `POST /api/requests/retry|cancel`,
+  `GET /api/waiting`; search and file results carry their request and the states `waiting` and `failed`.
+- Memory budget and ceiling (bacc05f): the torrents kept awake by choice share one budget (waiting requests first,
+  cheapest torrents first, gentleman mode with what is left); above a ceiling on Distribyted's real memory nothing new is
+  woken and gentleman slots, then the largest waiting torrents, are put back to sleep one at a time. Distribyted gets
+  `GOMEMLIMIT` = the ceiling. Settings on the page, without restart. Memory and waiting torrents logged every 5 min.
+- Page (c1049c1): cache requests filter and "Clear finished" (`POST /api/requests/clear`); search order and status
+  filter (`sort`, `status` in `/api/search` and `/api/prefetch`, followed by "Cache all"); a Memory tile.
+- A secret scan runs on each push (5e5ec46): gitleaks 8.30.1 over the whole history and the commit messages, with its
+  default rules, or the rules of the repository secret `SCAN_CONFIG` when set.
 - Ready views: per folder, a sibling folder (`<folder>_READY`) showing its files that are completely in the cache,
   archives (zip, 7z, rar) opened as folders and other files as they are, so browsing it never downloads anything. Set on
   the page (Folders: turn on, rename, turn off) or with `POST /api/ready-view`; renaming a folder renames its view unless
@@ -58,6 +76,10 @@ with `.env.example`, then `sh scripts/up.sh` (it rebuilds).
 - Batch add of magnet links, merged folders for torrents with the same name, crash watchdog (5f7ff68).
 
 ### Changed
+- Settings: `ATHENAFS_GENTLEMAN_MEMORY_MB` (1000) is replaced by `ATHENAFS_AWAKE_MEMORY_MB` (2000, shared by waiting
+  cache requests and gentleman mode) and `ATHENAFS_MEMORY_CEILING_MB` (8000) (bacc05f). The page's Settings override them.
+- The gentleman rows show the pieces held against the slot's budget and the pieces on the way (6f12a27).
+- The search time in `docs/measurements.md` uses another query word from 92ccd38 on (as many matches, same cost).
 - Supervisor rework (ac8c357): piece hashes in a table on disk, status computed in the background; supervisor memory
   13.9 GB to 0.9 GB, page and API from no answer within 120 s to immediate.
 - Confirmations and name entry happen in the page (ddba1ab, f4aba66): `confirm()` and `prompt()` pop-ups were blocked
@@ -67,6 +89,11 @@ with `.env.example`, then `sh scripts/up.sh` (it rebuilds).
 - Settings: `ATHENAFS_DORMANT_AFTER`, `ATHENAFS_HEALTH_PROBE`, `ATHENAFS_HEALTH_PARALLEL` added; `add_timeout` 45 s to 10 s.
 
 ### Fixed
+- Gentleman mode: the budget counted only the pieces asked for since the torrent was woken, so each restart asked for a
+  full budget again (one slot reached 2.4 times its share and evicted the others'); "held" counted pieces the cache had
+  evicted (6f12a27).
+- Lowering the maximum of gentleman slots released none (ee1543f).
+- Search results kept their state after "Cache" or "Cache all" instead of following it (6f12a27).
 - Distribyted crashed at start-up with many torrents (`concurrent map read and map write`) and served a folder from
   another one whose name it merely started with (5f7ff68).
 - A killed Distribyted left a dead FUSE mount and the share down; stale mounts are now cleared (ac8c357).

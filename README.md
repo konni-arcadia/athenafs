@@ -17,7 +17,8 @@ SMB like any other share. Built for collections of hundreds of torrents: tested 
   when a torrent looks dead.
 - **Gentleman mode (on by default):** every 6 h the trackers are asked how many seeders and leechers each torrent has.
   A few torrents in difficulty (1 or 2 seeders, leechers waiting) get a slot: their rarest pieces are downloaded into a
-  separate part of the cache and seeded, under an upload cap, until they have 3 seeders again or for 24 h.
+  separate part of the cache and seeded, under an upload cap, until they have 3 seeders again or for 24 h, within the
+  memory that waiting cache requests leave.
 - **Folders:** torrents with the same folder name share one folder (a collection split in parts appears once); a folder can
   be renamed, a torrent moved.
 - **Ready views:** for a folder you choose, a sibling folder (`<folder>_READY` by default) shows its files that are
@@ -73,38 +74,46 @@ The cache cap is set on the page (fixed size, or a share of the disk to keep fre
   folder. **Remove** a torrent with or without its cached data.
 - **Search** every file name of every torrent, with each file's state (cached, partial, not cached, downloading, queued,
   caching, waiting, failed) and the last health check of its torrent. Click a folder in a result to list everything under it
-  (`folder:path`). **Cache** reads a file, or every result, into the cache ahead of time.
+  (`folder:path`). Order (as in the torrents, name, largest or smallest first) and filter (all, cached, not cached).
+  **Cache** reads a file, or every result, into the cache ahead of time ("Cache all" follows the order and the filter);
+  the rows follow their state while files are queued or being read.
 - **Largest in the cache**, by file, folder or torrent, with **Erase** and links to open the item over SMB.
-- **Activity**: rates per torrent, files receiving data, the queue of files being cached.
+- **Tiles**: cache, disk, transfer, torrents, and memory: Distribyted's memory against its ceiling, and the torrents kept
+  awake by choice against their budget.
+- **Activity**: rates per torrent, files receiving data, the queue of files being cached, the requests waiting for a
+  seeder, the gentleman slots (pieces held against their budget).
 - **Cache requests**: every Cache asked for, kept across restarts (the queue resumes after one), with its state (queued,
   caching with progress, waiting for a seeder, done, failed, cancelled), **Cancel** and **Retry**. A file that gets no data
   waits as long as needed: its torrent is kept awake with the pieces it needs, within a memory budget (Settings); torrents
   left out are woken 10 minutes now and then (after 15 min, 30, 1 h, then every 2 h) and at once when a health check or the
-  trackers report a seeder. The header shows how many requests wait and how many arrived in the last 24 h.
+  trackers report a seeder. The header shows how many requests wait and how many arrived in the last 24 h. A filter on
+  the path, and **Clear finished** (forgets done, cancelled and failed requests).
 - **Folders**: torrents per folder (mounted, awake, health), **Rename** a folder (an existing name merges the two) or
   **Move** one torrent; **hide it from the share** or show it again (immediate, no restart); turn its **ready view** on or
   off, or rename it; for the whole folder at once: **Erase its cache**, **Remove folder** (with its cached data) or
   **Remove, keep data**.
 - **Cache**: what is stored per torrent as a tree, with **Erase** on a file, a folder, a torrent or everything (a piece
   shared with a file that was not chosen is kept, and the page says so).
-- **Settings**: cache cap.
+- **Settings**: cache cap; gentleman mode (slots, space, upload cap); memory for the torrents kept awake and the ceiling
+  of Distribyted's memory (applied without restart).
 - Adding, removing, renaming and erasing restart the core (a few seconds): the share is unavailable meanwhile and reads in
   progress fail.
 
 ## The API
 JSON over HTTP, documented on the server at `/api/docs` (and `/api/openapi.json`).
 - Status: `GET /api/status`, `GET /api/torrents`, `GET /api/torrents/{hash}`, `GET /api/activity`.
-- Files: `GET /api/search?q=words` (or `q=folder:path`) and `GET /api/file?path=…` give each file's state, its torrent's
+- Files: `GET /api/search?q=words` (or `q=folder:path`; `sort=name|largest|smallest`, `status=cached|not cached`) and `GET /api/file?path=…` give each file's state, its torrent's
   health, and where to open it: `smb_url` (Finder) and `unc_path` (Windows).
 - Space: `GET /api/usage?by=file|folder|torrent` lists what takes the most room in the cache.
 - Folders: `GET /api/folders`, `POST /api/ready-view` (`folder`, `on`, `name`), `POST /api/folder-visibility`
   (`folder`, `hidden`), `POST /api/folder-remove` (`folder`, `erase`). Items of a hidden folder have no `smb_url` or
   `unc_path`. To erase a folder's cache and keep its torrents: `POST /api/erase` with `path=<folder>`.
-- Cache requests: `GET /api/requests?state=all|open|waiting|failed|done|cancelled`, `POST /api/requests/retry` and
-  `POST /api/requests/cancel` (`path`, repeatable, or `all=true`). Search and file results carry their request.
+- Cache requests: `GET /api/requests?state=all|open|waiting|failed|done|cancelled` (and `q`, words in the path),
+  `POST /api/requests/retry` and `POST /api/requests/cancel` (`path`, repeatable, or `all=true`),
+  `POST /api/requests/clear` (forgets the finished ones). Search and file results carry their request.
   `GET /api/waiting`: the torrents kept awake or probed for them, the memory budget, the ceiling, and Distribyted's memory
   over the last 24 h.
-- Actions: `POST /api/prefetch` (read into the cache), `POST /api/prefetch/cancel`, `POST /api/erase` (a file, folder or
+- Actions: `POST /api/prefetch` (read into the cache; `path`, or `q` with `sort` and `status`), `POST /api/prefetch/cancel`, `POST /api/erase` (a file, folder or
   torrent).
 
 POST requests need an `Origin` header naming the page's host or `X-Athenafs: 1` (anti-CSRF), for example:
