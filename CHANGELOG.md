@@ -10,6 +10,12 @@ with `.env.example`, then `sh scripts/up.sh` (it rebuilds).
 
 ## [Unreleased]
 
+### Added
+- Published images: on each version tag, the CI builds `ghcr.io/konni-arcadia/athenafs-core` and `athenafs-smb` for
+  amd64 and arm64 on native runners, with a signed build provenance attestation; each image carries the GPL text, a
+  NOTICE pointing to its sources, and the commit it was built from. `scripts/up.sh` downloads them on a clean checkout of
+  a release tag and builds from source otherwise (`ATHENAFS_BUILD=1` always builds).
+
 ## [0.1.0] - 2026-10-23
 First release. Everything below, since the initial commit.
 

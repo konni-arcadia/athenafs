@@ -36,14 +36,22 @@ runs on a test host, each tied to the commit it measured. I use athenafs myself.
   `docs/measurements.md`.
 
 ## Requirements
-A Linux host with Docker (Compose v2), FUSE (`/dev/fuse`) and `findmnt`; `sudo` only on hosts whose `/` is not a shared
-mount (systemd hosts have it shared). The core container needs extra privileges for FUSE: read Security first.
+A Linux host (amd64 or arm64) with Docker (Compose v2), FUSE (`/dev/fuse`) and `findmnt`; `sudo` only on hosts whose `/`
+is not a shared mount (systemd hosts have it shared). Docker Desktop on macOS or Windows cannot share the FUSE mount
+with the host or the SMB container, so it is not supported. The core container needs extra privileges for FUSE: read
+Security first.
 
 ## Quick start
 ```sh
+git clone https://github.com/konni-arcadia/athenafs.git && cd athenafs
+git checkout "$(git describe --tags --abbrev=0)"   # the latest release
 cp .env.example .env      # optional: every setting is in it (see Configuration)
-sh scripts/up.sh          # prepares the host mount point, builds, starts core and smb
+sh scripts/up.sh          # prepares the host mount point, gets the images, starts core and smb
 ```
+On a release, `up.sh` downloads that release's images from `ghcr.io` (built by this repository's CI for amd64 and arm64,
+with a signed build provenance: `gh attestation verify oci://ghcr.io/konni-arcadia/athenafs-core:<version> -R
+konni-arcadia/athenafs`). Anywhere else (`main`, local changes) it builds them from source, which takes a few minutes;
+`ATHENAFS_BUILD=1` always builds.
 Open `http://localhost:8080/`, paste a magnet link (or the URL of a .torrent file, or pick a .torrent file) and add it. The
 torrent appears as a folder in the SMB share and under `data/mount/fs/` on the host.
 ```sh
@@ -213,7 +221,7 @@ docs/findings.md          what was measured and why things are the way they are
 docs/measurements.md      one row of measurements per commit
 CHANGELOG.md              notable changes, and what to check when upgrading
 CONTRIBUTING.md SECURITY.md  how to report a bug, propose a change, report a vulnerability
-.github/workflows/        secret scan of the history on each push and pull request
+.github/workflows/        secret scan on each push and pull request; images built and published on each release
 data/                     runtime data, not in git: torrents/ (optional .torrent files), state/, mount/
 ```
 

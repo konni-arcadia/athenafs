@@ -1,0 +1,14 @@
+athenafs core image
+
+This image contains:
+- Distribyted v0.15.0 (https://github.com/distribyted/distribyted, commit 58d471c31f392ba4b8cd5b394bdd172c6206adb6),
+  GPL-3.0-only, modified by the athenafs contributors since 2026-10-21 with the patches in core/patches/ (GPL-3.0-only),
+  each described in core/Dockerfile. It is built with Go and the module versions fixed by Distribyted's go.sum (MIT,
+  BSD, Apache-2.0 and MPL-2.0 licences; the MPL-2.0 modules, from github.com/anacrolix, are used unmodified).
+- The athenafs supervisor, /app/admin.py: GPL-3.0-or-later.
+- Alpine Linux packages (python3, fuse, and the libraries they need) under their own licences; their sources are in
+  Alpine's aports repository (https://gitlab.alpinelinux.org/alpine/aports) for the Alpine release this image is based on.
+
+Corresponding source: https://github.com/konni-arcadia/athenafs at the commit given by the image label
+org.opencontainers.image.revision (core/Dockerfile builds this image from it). The GPL version 3 is in COPYING, next to
+this file. There is no warranty.

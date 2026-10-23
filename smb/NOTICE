@@ -1,0 +1,8 @@
+athenafs smb image
+
+This image contains Samba and tini from Debian (trixie), under their own licences: see
+/usr/share/doc/<package>/copyright; their sources are at https://sources.debian.org and https://snapshot.debian.org.
+The athenafs files (/entrypoint.sh, /etc/samba/smb.conf) are GPL-3.0-or-later.
+
+Corresponding source: https://github.com/konni-arcadia/athenafs at the commit given by the image label
+org.opencontainers.image.revision (smb/Dockerfile builds this image from it). There is no warranty.

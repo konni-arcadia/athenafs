@@ -5,6 +5,8 @@
 name: athenafs
 services:
   core:
+    # scripts/up.sh downloads the published image of a release tag, or builds it from source (tag "local")
+    image: ghcr.io/konni-arcadia/athenafs-core:${ATHENAFS_TAG:-local}
     build: ./core
     container_name: athenafs-core
     restart: "no"
@@ -50,6 +52,7 @@ services:
         bind:
           propagation: rshared
   smb:
+    image: ghcr.io/konni-arcadia/athenafs-smb:${ATHENAFS_TAG:-local}
     build: ./smb
     container_name: athenafs-smb
     restart: "no"

@@ -105,4 +105,12 @@ RUN apk add --no-cache gcc libc-dev fuse-dev python3 \
 COPY --from=builder /bin/distribyted /bin/distribyted
 COPY admin.py /app/admin.py
 ENV DISTRIBYTED_FUSE_ALLOW_OTHER=true
+# Licences and sources of what this image contains (it is published: GPL); the GPL text comes with Distribyted's source.
+COPY --from=builder /src/LICENSE /usr/share/doc/athenafs/COPYING
+COPY NOTICE /usr/share/doc/athenafs/NOTICE
+LABEL org.opencontainers.image.licenses="GPL-3.0-or-later AND GPL-3.0-only"
+# Commit the image was built from (the CI passes it; scripts/up.sh sets it at run time for local builds). Last, so that
+# a new commit only rebuilds this layer.
+ARG ATHENAFS_COMMIT=unknown
+ENV ATHENAFS_COMMIT=$ATHENAFS_COMMIT
 ENTRYPOINT ["python3", "-u", "/app/admin.py"]

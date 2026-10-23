@@ -60,4 +60,18 @@ case "$(findmnt -no PROPAGATION --target "$DATA/mount")" in
      findmnt -rn "$DATA/mount" >/dev/null || sudo mount --bind "$DATA/mount" "$DATA/mount"
      sudo mount --make-rshared "$DATA/mount" ;;
 esac
+# Images: a clean checkout of a release tag (v1.2.3) uses that release's published images (ghcr.io), built and attested
+# by the CI; anything else builds them from source, and so does ATHENAFS_BUILD=1. If the download fails, it builds.
+tag=$(git describe --exact-match --tags --match 'v[0-9]*' 2>/dev/null || true)
+case $ATHENAFS_COMMIT in *-dirty) tag="" ;; esac
+[ "${ATHENAFS_BUILD:-0}" = 1 ] && tag=""
+if [ -n "$tag" ]; then
+  ATHENAFS_TAG=${tag#v}; export ATHENAFS_TAG
+  if docker compose pull; then
+    docker compose up -d --no-build "$@"
+    exit 0
+  fi
+  echo "The images of $tag could not be downloaded: building them from source instead." >&2
+fi
+ATHENAFS_TAG=local; export ATHENAFS_TAG
 docker compose up -d --build "$@"

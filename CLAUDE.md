@@ -16,6 +16,7 @@ Torrents as a read-only network folder (patched Distribyted + supervisor/web pag
 - Start and stop with `sh scripts/up.sh` / `sh scripts/down.sh`. They prepare the host mount point (bind mount of itself with
   shared propagation). Do not `docker compose up` by hand without `DATA` resolving to an absolute path you intend.
 - Changes to `core/admin.py` or to the patches need `sh scripts/up.sh` (it rebuilds); check with `curl localhost:8080/api`.
+  On a clean checkout of a release tag, `up.sh` downloads the published images instead: `ATHENAFS_BUILD=1` to build.
 - `core/admin.py` runs Distribyted as a child process. Anything that changes what is served or what is cached is done with
   Distribyted **stopped** (erasing cached pieces live breaks reads with `unexpected EOF`). Keep it that way.
 - The FUSE mount is in the sub-folder `mount/fs`, never directly on the bind-mounted `mount/`: an `umount` inside the container
