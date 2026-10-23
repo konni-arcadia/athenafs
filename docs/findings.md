@@ -400,13 +400,10 @@ case over SMB (copy first, then extract locally), a real torrent with sub-folder
   `BigCollection_READY` on, gentleman mode on with 3 slots (`dde7a316`, `363d8498` since 2026-10-22 18:00 UTC,
   `32f20bd8` since 18:18 UTC). Nothing needs this session: service, health checks and gentleman mode run on their own.
 - Next, in this order:
-  0. **Cache requests the owner can follow (owner's report, 2026-10-23):** a "Cache" request that failed (a 3.7 GB
-     zip: no reachable seeder) left no trace: failures and the queue live only in the supervisor's memory (the last 3
-     failures under Activity), so restarts erased them and the search just says "not cached". To do: keep every request
-     in SQLite with its state (queued, caching with progress, done, failed with reason and time, cancelled), resume the
-     queue after a restart, show the state in the search, `/api/file`, `/api/search` and a "Requests" section (filters,
-     Retry, Cancel), and retry failed ones automatically when the torrent has a seeder again (after the 6-hourly scrape),
-     up to a few attempts.
+  0. Done (2026-10-23, not committed yet): cache requests kept in SQLite, waiting for a seeder instead of failing,
+     torrents kept awake within a shared memory budget and a ceiling; see "Cache requests" in the open points. To watch:
+     the first real arrival, `GET /api/waiting` (`memory_log`) and the `wait_log` table after a few days, to see how often
+     seeders show up and whether 2000 MB and 8000 MB are right.
   1. Gentleman mode: understand "pieces held > pieces asked for" (`torrent/gentleman.go` in `core/patches/gentleman.patch`:
      `Complete` counts every complete piece of the torrent, `Wanted` the ones set to normal priority; check whether the
      client fetches more, e.g. through the readahead of a reader or the first-piece request) and the memory growth of
@@ -518,8 +515,51 @@ Open points (2026-10-22):
     to normal priority, or the "held" count includes pieces it should not; the separate cache caps the space, but the
     budget logic depends on it. **Memory creeps up:** Distribyted 4.1 GB at the measurement, 5.5 GB 8 hours later, CPU 21 %
     (three torrents talking to 1 to 46 peers continuously); not covered by the 3.5 kB per piece estimate.
-  - **Memory budget** (`ATHENAFS_GENTLEMAN_MEMORY_MB`, 1000 by default, on the page): candidates are taken in order of
+  - **Memory budget** (`ATHENAFS_GENTLEMAN_MEMORY_MB`, 1000 by default, on the page; since 2026-10-23 the budget shared with
+    waiting cache requests, `ATHENAFS_AWAKE_MEMORY_MB`, gentleman getting what they leave): candidates are taken in order of
     priority while their estimated cost (pieces x 3.5 kB) fits; a torrent too large for what is left is skipped. Lowering
     the budget releases the most recent slots that no longer fit. The 3 slots stay a maximum.
+- **Cache requests (built 2026-10-23, owner's report):** a "Cache" that failed (a 3.7 GB zip with no reachable
+  seeder) left no trace once the 3 lines under Activity rolled over or the core restarted. Every request is now a row of
+  `/data/requests.db` (apart from `search.db`, which may be deleted and rebuilt), one per file: queued, caching (progress
+  from memory), waiting, done, failed, cancelled. At start, what was queued or being read is queued again in the same
+  order; done and cancelled rows older than 30 days are dropped. Search and `/api/file` show the request; a "Cache
+  requests" section (filters, Cancel, Retry) and `GET /api/requests`, `POST /api/requests/retry|cancel`. Checked: a
+  small file done, a core restart in the middle of reads (both resumed), Cancel on a running read.
+  - **Waiting instead of failing (owner's decision, same day):** a first version failed a request after 3 reads of 60 s
+    and retried it after a scrape (every 6 h), at most 3 times. The owner objected: nobody knows when a seeder shows up,
+    and a failure is only seen by looking. Now a read that gets no data puts the request in **waiting**, for as long as
+    needed; the owner sees how long each has waited and cancels what is not worth it. "Failed" is only for files that
+    cannot be read at all (gone from the share, a path leaving it). Requests that failed under the first version were
+    turned into waiting ones.
+  - **How a request waits** (`plan_waiting`, every 30 s, and patch `wanted`): its torrent is **kept awake** with the pieces
+    it needs at normal priority, on the normal cache, with no file open (Distribyted rereads `/data/wanted.json` every
+    30 s and holds the listed torrents), so it downloads them as soon as a peer that has them connects; the request is done
+    when all its pieces are in the cache (the header then shows "N arrived" for 24 h). The memory of the torrents kept
+    awake by choice is one **shared budget** (2000 MB by default, estimated at 3.5 kB per piece), waiting requests first,
+    cheapest torrents first (the most requests for the memory), gentleman mode with what is left. A torrent too large for
+    what is left is **probed**: woken 10 min after 15 min, 30 min, 1 h, then every 2 h, and at once when a health check
+    (connected seeders) or a scrape reports a seeder after its last probe; at most 2 probes at a time. Not done through
+    reads in FUSE: dozens of reads blocked 60 s each could starve the share's own reads.
+  - **Memory ceiling** (8000 MB by default, Settings, applied without restart): Distribyted's real memory (VmRSS). Between
+    90 % and 100 % nothing new is woken; above it, one at a time every 25 min, a gentleman slot (the most recent) then the
+    largest listening torrent is put back to sleep (it is probed instead). Distribyted also gets `GOMEMLIMIT` = the
+    ceiling, so Go's collector works harder and returns memory near it (read at start only).
+  - **Does the memory come back when a torrent sleeps? (measured 2026-10-23, before building the ceiling)** Waking the
+    largest torrent (645,036 pieces, by a Cache request on a 34 kB file) took Distribyted from 4.44 to 5.92 GiB (about
+    2.4 kB per piece, below the 3.5 kB estimate). It slept 10 min after the read ended (03:57 UTC); its memory came back in
+    steps as Go returned it: 6.00, 5.50 (90 s later), 5.06, 4.61 GiB (9 min later). So a ceiling works, with a lag of about
+    20 min between "release" and the memory falling (idle delay plus Go's return); hence 25 min between two put-to-sleep.
+  - Checked on the running service: the 3.7 GB zip (31 MB estimate) kept awake, 18 peers, 0 seeders, 219 pieces
+    missing; a 34 kB file on the 645,000-piece torrent (2.26 GB estimate, over the budget) probed then asleep
+    until its next probe; gentleman's budget became 1968 MB; Settings applied without restart. On a copy of the tables
+    (file writes redirected): a waiting request whose pieces are cached becomes done with its arrival time; at 9 GB the
+    most recent gentleman slot is dropped, then (no slot left) the listening torrent stops listening; at 7.5 GB nothing is
+    woken again; at 4 GB it listens again; a seeder reported by a health check after the last probe starts a probe at once.
+    Not seen yet: a real arrival, a real ceiling crossing. The tables `wait_log` (every 5 min: peers, seeders and pieces
+    missing per waiting torrent) and `mem_log` (Distribyted's memory with the torrents awake, listening, probed, helped)
+    are there to see how often seeders show up and to set the budget from data.
+  - **Outage during the work (about 10 min):** `GOMEMLIMIT=8000MB` is not valid for Go (it wants `MiB`): Distribyted
+    exited at start; the check after the rebuild read the supervisor's state ("running"), not the mount. Check the mount.
 - **Not wanted yet:** pinning files in the cache (protecting them from eviction).
 - **Patches upstream:** the patches are local; the crash and prefix fixes would be worth proposing to Distribyted.
