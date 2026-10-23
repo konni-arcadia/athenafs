@@ -411,7 +411,7 @@ case over SMB (copy first, then extract locally), a real torrent with sub-folder
   2. Check the first rotation: slots end after 24 h (from about 2026-10-23 18:00 UTC) or at 3 seeders; released torrents
      must cancel their requests, sleep, and stay out for 24 h (`/data/gentleman_state.json`, `GET /api/gentleman`).
   3. Release `v0.1.0`: pinned builds and `CHANGELOG.md` are done; tag and GitHub release left (ask before pushing a tag).
-  4. Ideas below (WebDAV mode, AppArmor, Windows test, patches upstream).
+  4. Ideas below (AppArmor, Windows test, patches upstream; WebDAV mode shelved by the owner).
 - How to check the state: `curl -s localhost:8080/api/status`, `/api/gentleman`, `/api/folders`; Distribyted's memory:
   `docker exec athenafs-core sh -c 'grep VmRSS /proc/$(pidof distribyted)/status'`. Measure with `scripts/measure.sh`
   after committing (see CLAUDE.md).
@@ -421,7 +421,7 @@ Open points (2026-10-22):
   a GitHub release. The `apk` and `apt` packages installed during the build are not pinned. Stage 2
   (images built by CI and published to a registry) only if other people install it; a public image needs its source
   offered (GPL), which a private repository does not do.
-- **WebDAV mode (idea):** Distribyted has a WebDAV server; serving through it instead of FUSE + Samba would remove
+- **WebDAV mode (idea, shelved by the owner on 2026-10-23: not to be started unless asked):** Distribyted has a WebDAV server; serving through it instead of FUSE + Samba would remove
   `/dev/fuse`, `SYS_ADMIN` and AppArmor unconfined. To try first: Finder over WebDAV on the full set. The prefetch reader
   reads through the FUSE mount and would need another path. Windows' WebDAV client is weak (50 MB file limit by default).
 - **AppArmor:** a profile allowing only the FUSE mount instead of `unconfined` (needs loading on the host).
@@ -483,7 +483,7 @@ Open points (2026-10-22):
     sub-folder anywhere with exactly the hidden folder's name is hidden too.
   - Later, only if needed: an archive view as a separate SMB share with its own account. The share name itself is already
     a setting (`SMB_SHARE`).
-- **Page, folder rows (agreed 2026-10-22, not started):** one compact row per folder (name, torrents, size, status, and
+- **Page, folder rows (agreed 2026-10-22, built in d33b366, merged in 0f8c767):** one compact row per folder (name, torrents, size, status, and
   badges only when relevant: hidden, ready view, waiting for metadata, no peer) and one "Manage" button opening a panel in
   three blocks: "In the share" (normal view shown/hidden, ready view and its name and links, one sentence on the local
   library mode), "Folder" (rename, browse, the list of torrents), and a "Danger zone" framed apart (erase its cache,
@@ -577,5 +577,12 @@ Open points (2026-10-22):
   again every 5 s (not for waiting rows: a search costs about 1.4 s and a file can wait for days). Checked in the page:
   queued at the click, caching when a read slot freed, with no click. The owner's own "Cache all" (3 files, 517 MB) left
   no row in the request table; it was clicked during a rebuild, so it most likely reached the service while it stopped.
+- **Page additions (owner's requests, 2026-10-23):** Cache requests: a filter field (words in the path, `q` in
+  `/api/requests`) and "Clear finished" (forgets done, cancelled and failed requests; never queued, running or waiting
+  ones; `POST /api/requests/clear`). Search: an order (as in the torrents, name, largest or smallest first) and a status
+  filter (all, cached, not cached), also in `/api/search` (`sort`, `status`) and followed by "Cache all", which queues in
+  that order (with a status filter every match up to 10,000 is looked at before the page is cut). A Memory tile:
+  Distribyted's memory against the ceiling (orange above 90 %), and what is kept awake by choice against the budget
+  (the split between waiting requests and gentleman in its tooltip). Tiles wrap from 200 px.
 - **Not wanted yet:** pinning files in the cache (protecting them from eviction).
 - **Patches upstream:** the patches are local; the crash and prefix fixes would be worth proposing to Distribyted.
