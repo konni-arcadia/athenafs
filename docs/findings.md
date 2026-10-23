@@ -585,5 +585,13 @@ Open points (2026-10-22):
   that order (with a status filter every match up to 10,000 is looked at before the page is cut). A Memory tile:
   Distribyted's memory against the ceiling (orange above 90 %), and what is kept awake by choice against the budget
   (the split between waiting requests and gentleman in its tooltip). Tiles wrap from 200 px.
+- **Published images (2026-10-23, owner's go):** `images.yml` builds core and smb for amd64 and arm64 on native runners
+  (`ubuntu-24.04-arm`, free for public repositories; no QEMU: the Go build with cgo takes 5 min per architecture), combines
+  them into one image each on ghcr.io and signs a provenance attestation; the base images were already pinned to
+  multi-architecture digests. Packages are public (anonymous pulls answer 200). `up.sh` pulls on a clean checkout of a
+  release tag, builds otherwise. Checked: the published `sha-a6456dd` images list both platforms, both attestations name
+  `images.yml` and the commit; `scripts/smoke-image.sh` passed on amd64 here and on arm64 on an Apple Silicon Mac
+  (OrbStack, which provides `/dev/fuse`; Docker Desktop on macOS cannot run the whole stack: no shared propagation to
+  the host). Same SHA-256 for the same file on both. Not run yet: the whole stack (share included) on an arm64 Linux host.
 - **Not wanted yet:** pinning files in the cache (protecting them from eviction).
 - **Patches upstream:** the patches are local; the crash and prefix fixes would be worth proposing to Distribyted.

@@ -237,6 +237,8 @@ data/                     runtime data, not in git: torrents/ (optional .torrent
   previews and thumbnails were not, and a preview that reads a file wakes its torrent.
 - Nothing can be pinned in the cache: the oldest pieces leave first when the cap is reached.
 - The patches to Distribyted are local; they are not proposed upstream.
+- arm64: the core image was checked on an Apple Silicon Mac (OrbStack) with `scripts/smoke-image.sh` (start, a torrent
+  mounted, a file read twice), without the share; the whole stack has not been run on an arm64 Linux host yet.
 
 ## Contributing
 Issues and pull requests are welcome: see `CONTRIBUTING.md`. Security issues: `SECURITY.md` (private reporting, not a
