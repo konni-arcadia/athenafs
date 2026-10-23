@@ -50,7 +50,7 @@ sh scripts/up.sh          # prepares the host mount point, gets the images, star
 ```
 On a release, `up.sh` downloads that release's images from `ghcr.io` (built by this repository's CI for amd64 and arm64,
 with a signed build provenance: `gh attestation verify oci://ghcr.io/konni-arcadia/athenafs-core:<version> -R
-konni-arcadia/athenafs`). Anywhere else (`main`, local changes) it builds them from source, which takes a few minutes;
+konni-arcadia/athenafs`, GitHub CLI 2.49 or later). Anywhere else (`main`, local changes) it builds them from source, which takes a few minutes;
 `ATHENAFS_BUILD=1` always builds.
 Open `http://localhost:8080/`, paste a magnet link (or the URL of a .torrent file, or pick a .torrent file) and add it. The
 torrent appears as a folder in the SMB share and under `data/mount/fs/` on the host.
