@@ -400,6 +400,13 @@ case over SMB (copy first, then extract locally), a real torrent with sub-folder
   `BigCollection_READY` on, gentleman mode on with 3 slots (`dde7a316`, `363d8498` since 2026-10-22 18:00 UTC,
   `32f20bd8` since 18:18 UTC). Nothing needs this session: service, health checks and gentleman mode run on their own.
 - Next, in this order:
+  0. **Cache requests the owner can follow (owner's report, 2026-10-23):** a "Cache" request that failed (a 3.7 GB
+     zip: no reachable seeder) left no trace: failures and the queue live only in the supervisor's memory (the last 3
+     failures under Activity), so restarts erased them and the search just says "not cached". To do: keep every request
+     in SQLite with its state (queued, caching with progress, done, failed with reason and time, cancelled), resume the
+     queue after a restart, show the state in the search, `/api/file`, `/api/search` and a "Requests" section (filters,
+     Retry, Cancel), and retry failed ones automatically when the torrent has a seeder again (after the 6-hourly scrape),
+     up to a few attempts.
   1. Gentleman mode: understand "pieces held > pieces asked for" (`torrent/gentleman.go` in `core/patches/gentleman.patch`:
      `Complete` counts every complete piece of the torrent, `Wanted` the ones set to normal priority; check whether the
      client fetches more, e.g. through the readahead of a reader or the first-piece request) and the memory growth of
