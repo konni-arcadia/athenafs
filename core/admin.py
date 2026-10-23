@@ -1051,11 +1051,13 @@ function row(f){{
   const lk=f.smb_url?' <span class=mut>· <a href="'+esc(f.smb_url)+'" title="'+esc(f.smb_url)+'">open</a> · <a href=# data-copy="'+esc(f.unc_path)+'" title="'+esc(f.unc_path)+'">copy \\\\\\\\ path</a></span>':' <span class=mut>· hidden from the share</span>';
   return '<tr><td class=small>'+pathHtml(f.path)+lk+hl+rq+'</td><td class=n>'+sz(f.size)+'</td><td class=n><span class="pill '+(badge[f.status]||'')+'">'+esc(label)+'</span></td><td class=n>'+btn+'</td></tr>';
 }}
-async function runSearch(more){{
+async function runSearch(more,refresh){{  // refresh: the rows already shown again, to follow their status
   const q=document.getElementById('q').value.trim(), out=document.getElementById('sr');
-  if(!more){{so=0}} sq=q; if(!q){{out.innerHTML='';return}}
-  const r=await (await fetch('/api/search?q='+encodeURIComponent(q)+'&limit=100&offset='+so)).json();
-  if(q!==sq)return;
+  if(!more&&!refresh){{so=0}} sq=q; if(!q){{out.innerHTML='';return}}
+  const n=refresh?Math.min(500,so+100):100, o=refresh?0:so;
+  const r=await (await fetch('/api/search?q='+encodeURIComponent(q)+'&limit='+n+'&offset='+o)).json();
+  if(q!==sq||(refresh&&document.querySelector('#sr [data-armed]')))return;
+  if(refresh){{const t=document.getElementById('srt');if(t)t.innerHTML=r.results.map(row).join('');return}}
   if(r.error){{out.innerHTML='<span class=mut>'+esc(r.error)+'</span>';return}}
   const h=r.results.map(row).join('');
   const shown=so+r.results.length;
@@ -1067,6 +1069,9 @@ async function runSearch(more){{
   if(shown<r.total)out.insertAdjacentHTML('beforeend','<button id=srm style="margin-top:8px">More</button>');
 }}
 async function cache(d){{
+  // shown as queued at once; the list then follows the real status (see the refresh below)
+  document.querySelectorAll('#srt tr').forEach(tr=>{{const b=tr.querySelector('button.cache'),p=tr.querySelector('.pill');
+    if(b&&p&&(d.q||b.dataset.p===d.path)){{p.textContent='queued';p.className='pill busy';b.remove()}}}});
   const r=await post('/api/prefetch',d);
   document.getElementById('srmsg').innerHTML='<div class=msg>'+esc(r.error?r.error:(r.queued+' file(s) queued for the cache, '+sz(r.size)+(r.already?' ('+r.already+' already queued)':'')+': progress under Activity'
     +(r.no_peer?'. Warning: '+r.no_peer+' of them belong to torrents where the last health check found no peer at all':'')))+'</div>';
@@ -1114,6 +1119,7 @@ document.querySelectorAll('input[name=uby]').forEach(i=>i.addEventListener('chan
 document.getElementById('usage').addEventListener('toggle',e=>{{if(e.target.open)loadUsage()}});  // folded: loaded when opened
 setInterval(()=>{{if(document.getElementById('usage').open&&!document.querySelector('#ures [data-armed]'))loadUsage()}},30000);
 document.getElementById('q').addEventListener('input',()=>{{clearTimeout(st);st=setTimeout(()=>runSearch(false),250)}});
+setInterval(()=>{{if([...document.querySelectorAll('#srt .pill.busy')].some(p=>p.textContent!='waiting'))runSearch(false,true)}},5000);
 document.addEventListener('click',e=>{{
   const t=e.target;
   if(t.dataset.copy!==undefined){{e.preventDefault();navigator.clipboard?.writeText(t.dataset.copy).then(()=>{{t.textContent='copied'}},()=>{{t.textContent=t.dataset.copy;t.style.userSelect='all'}})}}
@@ -1202,7 +1208,8 @@ def gentleman_view():
         t, route = names.get(h, ({}, "?"))
         g = t.get("gentleman") or {}
         rows.append({"hash": h, "folder": route, "since": x["since"], "swarm": sw.get(h), "pieces_wanted": g.get("pieces_wanted", 0),
-                     "pieces_held": g.get("pieces_held", 0), "piece_size": g.get("piece_size", 0), "peers": g.get("peers", 0),
+                     "pieces_held": g.get("pieces_held", 0), "pieces_pending": g.get("pieces_pending", 0), "budget": g.get("budget", 0),
+                     "piece_size": g.get("piece_size", 0), "peers": g.get("peers", 0),
                      "uploaded": g.get("uploaded", 0), "active": bool(g)})
     known = [x for x in sw.values()]
     tp = torrent_pieces()
@@ -1228,9 +1235,10 @@ def gentleman_summary_html():
     for x in v["helped"]:
         s_ = x["swarm"] or {}
         held = x["pieces_held"] * x["piece_size"]
+        pend = f" · {x['pieces_pending']} on the way" if x["pieces_pending"] else ""
         rows += (f"<tr><td class=small>{html.escape(x['folder'])} <span class=mut>{x['hash'][:8]}</span></td>"
                  f"<td class=\"small mut\">{s_.get('seeders', '?')} seeder(s), {s_.get('leechers', '?')} leecher(s)</td>"
-                 f"<td class=\"n small\">{x['pieces_held']}/{x['pieces_wanted']} rare pieces ({mb(held)})</td>"
+                 f"<td class=\"n small\">{x['pieces_held']} rare pieces held ({mb(held)} of {mb(x['budget'])}){pend}</td>"
                  f"<td class=\"n small\">{mb(x['uploaded'])} sent</td></tr>")
     return head + (f"<div class=wrap><table>{rows}</table></div>" if rows else "")
 

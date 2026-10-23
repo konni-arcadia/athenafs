@@ -85,10 +85,10 @@ index 72c94d1..3e0ba74 100644
 +}
 diff --git a/torrent/gentleman.go b/torrent/gentleman.go
 new file mode 100644
-index 0000000..5ae2105
+index 0000000..b1e490f
 --- /dev/null
 +++ b/torrent/gentleman.go
-@@ -0,0 +1,155 @@
+@@ -0,0 +1,171 @@
 +package torrent
 +
 +import (
@@ -212,13 +212,27 @@ index 0000000..5ae2105
 +				}
 +			}
 +		}
++		// held: complete pieces actually in the gentleman cache. The client keeps a piece complete in memory after the
++		// cache has evicted it; UpdateCompletion reads the storage again.
 +		complete := 0
 +		for i := 0; i < n; i++ {
-+			if t.Piece(i).State().Complete {
-+				complete++
++			if p := t.Piece(i); p.State().Complete {
++				p.UpdateCompletion()
++				if p.State().Complete {
++					complete++
++				}
 +			}
 +		}
-+		if peers > 0 && int64(len(wanted))*pl < j.budget {
++		// the budget covers what is held (from earlier runs too: wanted starts empty at each wake) plus what is asked
++		// for and not arrived yet
++		pending := 0
++		for i := range wanted {
++			if !t.Piece(i).State().Complete {
++				pending++
++			}
++		}
++		used := int64(complete+pending) * pl
++		if peers > 0 && used < j.budget {
 +			var cand []int
 +			for i := 0; i < n; i++ {
 +				if avail[i] > 0 && !wanted[i] && !t.Piece(i).State().Complete {
@@ -227,15 +241,17 @@ index 0000000..5ae2105
 +			}
 +			sort.SliceStable(cand, func(a, b int) bool { return avail[cand[a]] < avail[cand[b]] })
 +			for _, i := range cand {
-+				if int64(len(wanted)+1)*pl > j.budget {
++				if used+pl > j.budget {
 +					break
 +				}
 +				t.Piece(i).SetPriority(torrent.PiecePriorityNormal)
 +				wanted[i] = true
++				used += pl
++				pending++
 +			}
 +		}
 +		st := t.Stats()
-+		s.s.SetGentle(h, &Gentle{Budget: j.budget, Wanted: len(wanted), Complete: complete, PieceSize: pl,
++		s.s.SetGentle(h, &Gentle{Budget: j.budget, Wanted: len(wanted), Pending: pending, Complete: complete, PieceSize: pl,
 +			Peers: peers, Seeders: st.ConnectedSeeders, Uploaded: st.BytesWrittenData.Int64()})
 +		select {
 +		case <-j.stop:
@@ -275,10 +291,10 @@ index bd3d802..d6bd0aa 100644
  			return nil, err
  		}
 diff --git a/torrent/stats.go b/torrent/stats.go
-index 4dcbc23..26efc48 100644
+index 4dcbc23..f8f2787 100644
 --- a/torrent/stats.go
 +++ b/torrent/stats.go
-@@ -44,6 +44,19 @@ type TorrentStats struct {
+@@ -44,6 +44,20 @@ type TorrentStats struct {
  	Dormant bool `json:"dormant"`
  	// Health: result of the last health check of this torrent since Distribyted started (nil: not checked yet).
  	Health *Health `json:"health,omitempty"`
@@ -289,8 +305,9 @@ index 4dcbc23..26efc48 100644
 +// Gentle: what gentleman mode does for a torrent (rarest pieces asked for, held, upload sent).
 +type Gentle struct {
 +	Budget    int64 `json:"budget"`
-+	Wanted    int   `json:"pieces_wanted"`
-+	Complete  int   `json:"pieces_held"`
++	Wanted    int   `json:"pieces_wanted"`  // asked for since the torrent was woken
++	Pending   int   `json:"pieces_pending"` // asked for and not arrived yet
++	Complete  int   `json:"pieces_held"`    // in the gentleman cache (from earlier wakes too)
 +	PieceSize int64 `json:"piece_size"`
 +	Peers     int   `json:"peers"`
 +	Seeders   int   `json:"seeders"`
@@ -298,7 +315,7 @@ index 4dcbc23..26efc48 100644
  }
  
  // Health: the most peers seen while a torrent was woken for a health check (no file open, nothing downloaded).
-@@ -94,6 +107,7 @@ type Stats struct {
+@@ -94,6 +108,7 @@ type Stats struct {
  	previousStats   map[string]*stat
  	dormant         map[string]map[string]*TorrentStats // route -> info-hash -> fixed stats of a dormant torrent
  	health          map[string]*Health                  // info-hash -> last health check
@@ -306,7 +323,7 @@ index 4dcbc23..26efc48 100644
  
  	gTime time.Time
  }
-@@ -106,6 +120,7 @@ func NewStats() *Stats {
+@@ -106,6 +121,7 @@ func NewStats() *Stats {
  		previousStats:   make(map[string]*stat),
  		dormant:         make(map[string]map[string]*TorrentStats),
  		health:          make(map[string]*Health),
@@ -314,7 +331,7 @@ index 4dcbc23..26efc48 100644
  	}
  }
  
-@@ -170,6 +185,16 @@ func (s *Stats) SetDormant(route, hash, name string, pieces int, pieceSize int64
+@@ -170,6 +186,16 @@ func (s *Stats) SetDormant(route, hash, name string, pieces int, pieceSize int64
  	s.dormant[route][hash] = &TorrentStats{Name: name, Hash: hash, TotalPieces: pieces, PieceSize: pieceSize, Dormant: true}
  }
  
@@ -331,7 +348,7 @@ index 4dcbc23..26efc48 100644
  func (s *Stats) SetHealth(hash string, h *Health) {
  	s.mut.Lock()
  	defer s.mut.Unlock()
-@@ -202,6 +227,7 @@ func (s *Stats) RoutesStats() []*RouteStats {
+@@ -202,6 +228,7 @@ func (s *Stats) RoutesStats() []*RouteStats {
  		for _, t := range tl {
  			ts := s.stats(now, t, true)
  			ts.Health = s.health[ts.Hash]
