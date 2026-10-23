@@ -136,6 +136,15 @@ for Windows.
 - Mac: Finder > Go > Connect to Server > `smb://<host>/torrents`, or `mount_smbfs //tor:rent@<host>/torrents <dir>`.
 - Windows: `\\<host>\torrents` in the Explorer address bar, or `net use \\<host>\torrents /user:tor rent`.
 
+**If this host already serves SMB shares** (its own Samba or ksmbd), port 445 is usually taken on every address and the
+share cannot start there; `scripts/up.sh` detects it, explains, and starts nothing. Two ways, both set in `.env` and
+leaving the host's own SMB server as it is (athenafs does not touch the host's configuration):
+- **Another port**, `SMB_PORT=4445` (or any free port). Macs connect with `smb://<host>:4445/torrents`. Windows' client
+  uses port 445 only, except in recent versions: `net use \\<host>\torrents /TCPPORT:4445`.
+- **A second IP address on the host** for the share, `SMB_BIND=<that address>`: every client keeps port 445. The host's
+  SMB server must then listen on its own address only (Samba: `interfaces` and `bind interfaces only = yes`), which is a
+  change to the host's configuration, made by you.
+
 Archives (zip, 7z, rar) are shown as ordinary files by default. Distribyted can show them as folders, but opening each one
 downloads its headers (4 to 10 MB measured), so browsing hundreds of them would download gigabytes. For a big archive, copy
 it first, then extract it locally. A solid 7z read through the share needs a cache cap larger than the archive.

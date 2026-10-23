@@ -29,6 +29,27 @@ fi
 ATHENAFS_WARNINGS=${w#|}
 export ATHENAFS_WARNINGS
 [ -z "$w" ] || printf '%s\n' "$w" | tr '|' '\n' | sed '/^$/d; s/^/WARNING: /' >&2
+# The share needs its port. Another SMB server on this host (Samba, ksmbd) usually holds 445 on every address, and
+# Docker would then fail to start the smb container with a bare "address already in use": stop here and explain.
+# Our own smb container holding the port (a restart) is fine.
+smb_bind=${SMB_BIND:-127.0.0.1}; smb_port=${SMB_PORT:-445}
+if command -v ss >/dev/null && [ -z "$(docker ps -q -f name='^athenafs-smb$' 2>/dev/null)" ]; then
+  # a listener blocks us when it holds the port on every address, on our address, or when we want every address
+  taken=$(ss -ltnH "sport = :$smb_port" 2>/dev/null | awk -v b="$smb_bind" '{a=$4; sub(/:[0-9]+$/, "", a); gsub(/[][]/, "", a)
+    if (a == "0.0.0.0" || a == "::" || a == "*" || a == b || b == "0.0.0.0" || b == "::") { print a; exit }}')
+  if [ -n "$taken" ]; then
+    cat >&2 <<EOF
+ERROR: port $smb_port is already used on this host ($taken:$smb_port), probably by another SMB server (the host's own
+Samba or ksmbd), so the athenafs share cannot start there. Nothing was started. Either, in .env:
+  - another port: SMB_PORT=4445 (or any free port). Macs connect with smb://<host>:4445/torrents; Windows only in
+    recent versions, with: net use \\\\<host>\\torrents /TCPPORT:4445
+  - or a second IP address on this host for the share: SMB_BIND=<that address> (port 445 stays usable by every client),
+    with the host's own SMB server limited to its own address (Samba: "interfaces" and "bind interfaces only").
+See "The SMB share" in README.md.
+EOF
+    exit 1
+  fi
+fi
 mkdir -p "$DATA/torrents" "$DATA/state" "$DATA/state/smb" "$DATA/mount"
 # mount/fs can be a dead FUSE mount left by a killed run (stat fails: "Transport endpoint is not connected"); the core
 # unmounts it when it starts, and that propagates here
