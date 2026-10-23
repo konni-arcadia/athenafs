@@ -593,5 +593,9 @@ Open points (2026-10-22):
   `images.yml` and the commit; `scripts/smoke-image.sh` passed on amd64 here and on arm64 on an Apple Silicon Mac
   (OrbStack, which provides `/dev/fuse`; Docker Desktop on macOS cannot run the whole stack: no shared propagation to
   the host). Same SHA-256 for the same file on both. Not run yet: the whole stack (share included) on an arm64 Linux host.
+- **macOS "share only" mode (idea, shelved by the owner on 2026-10-23: not to be started unless asked):** the images run
+  on a Mac (OrbStack's VM provides `/dev/fuse`), but `up.sh` needs `findmnt` and the FUSE mount must be shared with the
+  smb container and the host, which the Mac's file sharing into the VM does not allow. A mode where the propagation
+  stays between the two containers on a path of the VM, the share being the only output, would need a test first.
 - **Not wanted yet:** pinning files in the cache (protecting them from eviction).
 - **Patches upstream:** the patches are local; the crash and prefix fixes would be worth proposing to Distribyted.
