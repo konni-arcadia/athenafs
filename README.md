@@ -118,6 +118,9 @@ JSON over HTTP, documented on the server at `/api/docs` (and `/api/openapi.json`
 - Status: `GET /api/status`, `GET /api/torrents`, `GET /api/torrents/{hash}`, `GET /api/activity`.
 - Files: `GET /api/search?q=words` (or `q=folder:path`; `sort=name|largest|smallest`, `status=cached|not cached`) and `GET /api/file?path=…` give each file's state, its torrent's
   health, and where to open it: `smb_url` (Finder) and `unc_path` (Windows).
+- Cached files: `GET /api/cached` (optional `folder`, `format=ndjson`) lists every file completely in the cache in one
+  answer, kept up to date every 30 s, with a `generation` that is also its ETag (`If-None-Match` answers 304 when nothing
+  changed). In the search, `status=cached` draws from the same list.
 - Space: `GET /api/usage?by=file|folder|torrent` lists what takes the most room in the cache.
 - Folders: `GET /api/folders`, `POST /api/ready-view` (`folder`, `on`, `name`), `POST /api/folder-visibility`
   (`folder`, `hidden`), `POST /api/folder-remove` (`folder`, `erase`). Items of a hidden folder have no `smb_url` or

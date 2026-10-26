@@ -597,5 +597,15 @@ Open points (2026-10-22):
   on a Mac (OrbStack's VM provides `/dev/fuse`), but `up.sh` needs `findmnt` and the FUSE mount must be shared with the
   smb container and the host, which the Mac's file sharing into the VM does not allow. A mode where the propagation
   stays between the two containers on a path of the VM, the share being the only output, would need a test first.
+- **The list of cached files (2026-10-26, a client's request, the owner's go):** a client needed every
+  file completely in the cache in one reliable call. `status=cached` in the search looked at the first 10,000 matches
+  of the query, then kept the cached ones: on a folder of more than 10,000 files the answer depended on the query form
+  (1,482 and 830 files for the same folder). `/api/usage` was complete but listed partial files too, 1,000 a page,
+  about 15 s a call (it maps every cached piece to its torrent each time). Now the supervisor keeps the complete files in
+  memory, updated every 30 s from the pieces that arrived or left (a full pass at start and when torrents are added,
+  removed or moved), with a generation number. Checked: `/api/cached` 5,634 files, 67.05 GB, exactly the files with
+  `cached >= size` in `/api/usage` (none missing on either side), 0.02 s, 1.2 MB; the ETag gives 304; the two query
+  forms and `/api/cached?folder=` all give 5,597 files; a 1.7 kB file cached by hand entered the list 15 s after it was
+  complete (generation 1 -> 2).
 - **Not wanted yet:** pinning files in the cache (protecting them from eviction).
 - **Patches upstream:** the patches are local; the crash and prefix fixes would be worth proposing to Distribyted.

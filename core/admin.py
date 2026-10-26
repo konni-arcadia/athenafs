@@ -1717,7 +1717,9 @@ API_DOC = [
     ("GET", "/api/torrents", "folder (optional)", "Every torrent: folder, status, awake, size, cached, health, location of its top folder in the share."),
     ("GET", "/api/torrents/{hash}", "", "One torrent, with its largest cached files."),
     ("GET", "/api/search", "q (words, all must match; or folder:path), sort (name, largest or smallest; default: torrent order), status (cached or not cached; default: all), limit (≤ 500), offset",
-     "Files whose path contains every word. Each result: size, status (cached, partial, not cached, downloading, queued, caching, waiting, failed), cached bytes, its Cache request if any, health, smb_url, unc_path."),
+     "Files whose path contains every word. Each result: size, status (cached, partial, not cached, downloading, queued, caching, waiting, failed), cached bytes, its Cache request if any, health, smb_url, unc_path. status=cached draws from the list of complete files (see /api/cached): complete, never capped. status=not cached looks at the first 10,000 matches only (total_capped says so). For the whole list of cached files, use /api/cached."),
+    ("GET", "/api/cached", "folder (optional: only under this share path), format (json or ndjson)",
+     "Every file completely in the cache, in one answer with no page cap, sorted by path: path, size, torrent hash, folder, hidden. Kept up to date every 30 s. Fields generation (grows when the list changes; also the ETag: send If-None-Match to get 304 Not Modified when nothing changed), changed and checked (times), total, total_size. ndjson: a first line with those fields, then one line per file. 503 with Retry-After for a few seconds after a start."),
     ("GET", "/api/file", "path (as in the share)", "One file: status, cached bytes, its Cache request if any (state, error, attempts), torrent, health, smb_url, unc_path."),
     ("GET", "/api/requests", "state (all, open, waiting, failed, done or cancelled), q (words that must all appear in the path), limit (≤ 500), offset",
      "Cache requests, kept across restarts: state (queued, caching, waiting for a seeder, failed, done, cancelled), bytes read, error, waiting since, arrived, counts per state; a waiting one says how its torrent waits (kept awake, probed, or asleep until its next probe). A request that gets no data waits as long as needed; failed is only for files that cannot be read."),
@@ -1818,6 +1820,8 @@ class H(http.server.BaseHTTPRequestHandler):
         q = urllib.parse.parse_qs(u.query)
         one = lambda k, d="": (q.get(k) or [d])[0]
         res, body, ct = None, None, "application/json"
+        if u.path == "/api/cached":
+            return self.send_cached(one("folder"), one("format", "json"))
         try:
             if u.path == "/api":
                 body = served["json"] or json.dumps(snapshot()).encode()
@@ -1857,6 +1861,25 @@ class H(http.server.BaseHTTPRequestHandler):
         if body is None:   # the page
             body = served["html"] or render().encode(); ct = "text/html; charset=utf-8"
         self.send_response(200); self.send_header("Content-Type", ct)
+        self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+
+    def send_cached(self, folder, fmt):
+        """/api/cached: the whole list in one answer, with an ETag (the generation) so that a client can poll cheaply."""
+        if not complete["ready"]:
+            body = json.dumps({"error": "the list is being built after a start, retry in a few seconds"}).encode()
+            self.send_response(503); self.send_header("Retry-After", "10")
+        else:
+            etag = f'"gen-{complete["generation"]}"'
+            if self.headers.get("If-None-Match") == etag:
+                self.send_response(304); self.send_header("ETag", etag); self.send_header("Content-Length", "0"); self.end_headers()
+                return
+            head, items = cached_view(folder, fmt)
+            if fmt == "ndjson":   # one line for the totals, then one line per file
+                body = "\n".join(json.dumps(x) for x in [head] + items).encode() + b"\n"
+            else:
+                body = json.dumps(dict(head, files=items)).encode()
+            self.send_response(200); self.send_header("ETag", etag)
+        self.send_header("Content-Type", "application/x-ndjson" if fmt == "ndjson" and complete["ready"] else "application/json")
         self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
 
     def do_POST(self):
@@ -2211,6 +2234,8 @@ def search_rows(c, q, sort="", status="", limit=None, offset=0):
         rows = c.execute(f"SELECT files.hash, files.path, files.tpath, files.size, files.off {base}{order} LIMIT ? OFFSET ?",
                          args + [n, offset]).fetchall()
         return rows, min(total, SEARCH_CAP), total_size, total > SEARCH_CAP
+    if status == "cached" and complete["ready"]:   # complete and consistent: from the list of complete files
+        return cached_search(q, sort, limit, offset)
     # a status filter: every match is looked at (at most SEARCH_CAP), then the page is cut from what is left
     rows = c.execute(f"SELECT files.hash, files.path, files.tpath, files.size, files.off {base}{order} LIMIT {SEARCH_CAP + 1}",
                      args).fetchall()
@@ -2223,6 +2248,25 @@ def search_rows(c, q, sort="", status="", limit=None, offset=0):
             kept.append((h, path, tpath, size, off, st, have))
     page = kept[offset:] if limit is None else kept[offset:offset + limit]
     return page, len(kept), sum(r[3] for r in kept), capped
+
+
+def cached_search(q, sort, limit, offset):
+    """search_rows() for status=cached: the files of the complete list that match q (same rules as the index: every word
+    as a case-insensitive substring of the path, or folder:<path>). Never capped."""
+    q = q.strip()
+    with clock:
+        files = list(complete["files"].values())
+    if q.startswith("folder:"):
+        prefix = q[7:].strip().strip("/") + "/"
+        rows = [f for f in files if f["path"].startswith(prefix)]
+    else:
+        words = [w.lower() for w in q.split()]
+        rows = [f for f in files if all(w in f["path"].lower() for w in words)]
+    key = {"name": lambda f: f["path"], "largest": lambda f: -f["size"], "smallest": lambda f: f["size"]}.get(sort)
+    rows.sort(key=key or (lambda f: (f["hash"], f["off"])))   # "": torrent by torrent, like the index
+    page = rows[offset:] if limit is None else rows[offset:offset + limit]
+    return ([(f["hash"], f["path"], f["torrent_path"], f["size"], f["off"], "cached", f["size"]) for f in page],
+            len(rows), sum(f["size"] for f in rows), False)
 
 
 def search(q, limit=50, offset=0, sort="", status=""):
@@ -2841,6 +2885,85 @@ def complete_files(views):
     return out
 
 
+# ---------------------------------------------------------------- every file completely in the cache (/api/cached)
+
+# Kept up to date every 30 s from the pieces that arrived in or left the cache since the last pass (a full pass at
+# start and when torrents are added, removed or moved: share paths change). generation grows when the list changes.
+complete = {"files": {}, "generation": 0, "changed": 0, "checked": 0, "ready": False}
+_complete_state = {"owners": {}, "sizes": {}, "key": None}
+clock = threading.Lock()
+
+
+def complete_pass():
+    st = _complete_state
+    tp = torrent_pieces(); sources = load_sources()
+    key = tuple(sorted((source_hash(x) or "", x["route"]) for x in sources)) + (len(tp),)
+    files = cache_files()
+    full = key != st["key"]
+    if full:
+        st["owners"], st["sizes"], st["key"] = {}, {}, key
+    added = files.keys() - st["sizes"].keys(); removed = st["sizes"].keys() - files.keys()
+    if added:
+        st["owners"].update(piece_owners(added))
+    flat = flat_folders(tp, sources)
+    route_of = {source_hash(x): x["route"] for x in sources}
+    touched = set()
+    for h in added | removed:
+        size = files.get(h) or st["sizes"].get(h, 0)
+        for ih, i in st["owners"].get(h, ()):
+            t = tp.get(ih)
+            if t:
+                touched.update((ih, k) for k, _ in files_of_piece(t, i, size))
+    for h in removed:
+        st["owners"].pop(h, None); st["sizes"].pop(h, None)
+    for h in added:
+        st["sizes"][h] = files[h]
+    cached = set(files)
+    out = {} if full else dict(complete["files"])
+    for ih, k in touched:
+        t = tp[ih]; fp, o, n = t["files"][k]
+        r = route_of.get(ih)
+        if n <= 0 or is_padding(fp) or not r:
+            continue
+        path = share_path(r, t, fp, flat.get(r))
+        pl = t["pl"]
+        if all(piece(t, i) in cached for i in range(o // pl, (o + n - 1) // pl + 1)):
+            out[path] = {"path": path, "size": n, "hash": ih, "folder": r, "torrent_path": fp, "off": o}
+        else:
+            out.pop(path, None)
+    now = time.time()
+    with clock:
+        if out.keys() != complete["files"].keys() or not complete["ready"]:
+            complete["generation"] += 1; complete["changed"] = now
+        complete.update(files=out, checked=now, ready=True)
+
+
+def complete_indexer():
+    while not pieces_ready["done"]:   # the piece table is built by the indexer at start
+        time.sleep(5)
+    while True:
+        try:
+            complete_pass()
+        except Exception as e:
+            print("complete files:", e)
+        time.sleep(30)
+
+
+def cached_view(folder="", fmt="json"):
+    """Every file completely in the cache (all of it, no page), sorted by path, optionally only under a folder of the
+    share. Hidden folders are included, marked."""
+    prefix = folder.strip("/")
+    with clock:
+        files, gen, changed, checked = complete["files"], complete["generation"], complete["changed"], complete["checked"]
+    rows = sorted((f for p, f in files.items() if not prefix or p == prefix or p.startswith(prefix + "/")), key=lambda f: f["path"])
+    hidden = set(hidden_folders)
+    items = [{"path": f["path"], "size": f["size"], "hash": f["hash"], "folder": f["folder"], "hidden": f["folder"] in hidden}
+             for f in rows]
+    head = {"generation": gen, "changed": changed, "checked": checked, "folder": prefix, "total": len(items),
+            "total_size": sum(f["size"] for f in items)}
+    return head, items
+
+
 ARCHIVE_EXT = (".zip", ".7z", ".rar")
 _written = {"views": None, "hidden": None, "lists": {}}
 
@@ -3250,6 +3373,7 @@ def main():
     for _ in range(PREFETCH_WORKERS):
         threading.Thread(target=prefetch_worker, daemon=True).start()
     threading.Thread(target=waiter, daemon=True).start()
+    threading.Thread(target=complete_indexer, daemon=True).start()
     srv = http.server.ThreadingHTTPServer(("0.0.0.0", 8080), H)
     signal.signal(signal.SIGTERM, lambda *a: (stop(), os._exit(0)))
     srv.serve_forever()

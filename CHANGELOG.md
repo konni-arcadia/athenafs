@@ -10,6 +10,17 @@ with `.env.example`, then `sh scripts/up.sh` (it rebuilds).
 
 ## [Unreleased]
 
+### Added
+- `GET /api/cached`: every file completely in the cache in one answer (no page cap; JSON, or NDJSON with
+  `format=ndjson`), optionally under a folder, with a `generation` that is also the ETag (`If-None-Match` answers 304).
+  Kept in memory and updated every 30 s from the pieces that arrived or left. Answers in hundredths of a second.
+- Waiting requests whose torrent is receiving data say so in Cache requests (rate, pieces here) and in Activity (04cb119).
+
+### Fixed
+- `/api/search` with `status=cached` gave a different part of the answer for each form of the same query (it looked at
+  the first 10,000 matches only, then kept the cached ones): it now draws from the list of complete files, complete and
+  never capped. `status=not cached` still looks at the first 10,000 matches, as `total_capped` says.
+
 ## [0.2.0] - 2026-10-23
 
 ### Added
