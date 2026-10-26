@@ -1111,9 +1111,11 @@ async function loadReqs(){{
     let info=x.state=='caching'?sz(x.read)+' / '+sz(x.size)+'<div class=bar><i style="width:'+pct+'%"></i></div>':x.state+' '+ago(x.updated);
     if(x.state=='waiting'){{
       info='for '+dur(now-x.waiting_since);
-      if(w)info+='<br>'+(w.mode=='listening'?'kept awake: '+w.peers+' peer'+(w.peers==1?'':'s')+', '+w.seeders+' seeder'+(w.seeders==1?'':'s')
+      const rcv=w&&w.last_received&&now-w.last_received<180;
+      if(w)info+='<br>'+(rcv?'<b>receiving data</b>, '+sz(w.down_rate)+'/s ('+w.peers+' peers, '+w.seeders+' seeder'+(w.seeders==1?'':'s')+')'
+        :w.mode=='listening'?'kept awake: '+w.peers+' peer'+(w.peers==1?'':'s')+', '+w.seeders+' seeder'+(w.seeders==1?'':'s')
         :w.mode=='probing'?'probing now ('+w.peers+' peers)':'asleep (memory budget used), next probe in '+dur(Math.max(0,w.next_probe-now)))
-        +' · '+w.missing_pieces+' piece'+(w.missing_pieces==1?'':'s')+' missing';
+        +' · '+(w.pieces_needed-w.missing_pieces)+' of '+w.pieces_needed+' piece'+(w.pieces_needed==1?'':'s')+' here';
     }}
     if(x.state=='done'&&x.arrived&&x.waiting_since)info+='<br>arrived after waiting '+dur(x.arrived-x.waiting_since);
     const err=x.error&&!['done','waiting'].includes(x.state)?'<div class="small '+(x.state=='failed'?'warn':'mut')+'">'+esc(x.error)+'</div>':'';
@@ -1476,6 +1478,14 @@ def render(s=None):
                 f"being probed, {sum(x['mode'] == 'sleeping' for x in ws)} asleep until their next probe · Distribyted uses "
                 f"{mb(awake['rss'])} of {mb(awake.get('ceiling', 0))}{' (over the ceiling: nothing new is woken)' if awake['over'] else ''}"
                 f"</span> <a href=#reqs class=reqlink data-f=waiting>details</a></div>")
+        recv = [x for x in ws if x.get("last_received") and time.time() - x["last_received"] < 180]
+        if recv:
+            act += "<div class=wrap><table><tr><th>Waiting request receiving data</th><th class=n>Down</th><th class=n>Pieces here</th><th class=n>Peers</th></tr>"
+            for x in sorted(recv, key=lambda x: -x["down_rate"]):
+                act += (f"<tr><td>{html.escape(x['name'])} <span class=\"mut small\">{x['hash'][:8]} · {x['requests']} request(s)</span></td>"
+                        f"<td class=n>{rate(x['down_rate'])}</td><td class=n>{x['pieces_needed'] - x['missing_pieces']} of {x['pieces_needed']}</td>"
+                        f"<td class=n>{x['peers']} ({x['seeders']} seeder{'s' if x['seeders'] != 1 else ''})</td></tr>")
+            act += "</table></div>"
     if a["torrents"]:
         act += "<div class=wrap><table><tr><th>Torrent</th><th>Folder</th><th class=n>Down</th><th class=n>Up</th><th class=n>Peers</th></tr>"
         for x in a["torrents"][:15]:
@@ -2683,20 +2693,34 @@ def plan_waiting(log=False):
     c.close()
 
     peers = {x["hash"]: x for x in activity.get("torrents") or []}
+    # data received, from the torrent's cumulative counter between two runs (the instant rate is bursty); the counter
+    # starts again from 0 when the torrent is woken again
+    rx = awake.setdefault("rx", {})   # hash -> (time, bytes downloaded, last time bytes arrived)
     torrents = {}
     for h, x in need.items():
         n, nx, lp = newp.get(h, probes.get(h, (0, 0, 0)))
         mode = "listening" if h in listening else "probing" if h in probing else "sleeping"
+        got = peers.get(h, {}).get("downloaded")
+        t0, d0, last = rx.get(h, (now, got, 0))
+        rx_rate = (got - d0) / (now - t0) if got is not None and d0 is not None and got >= d0 and now > t0 else 0
+        if rx_rate > 0:
+            last = now
+        rx[h] = (now, got, last)
         torrents[h] = {"hash": h, "name": tp[h]["name"], "mode": mode, "requests": x["requests"], "missing_pieces": x["missing"],
                        "waiting_since": x["since"], "memory_estimate": cost[h], "probes": n, "next_probe": nx if mode == "sleeping" else None,
                        "until": lp if mode == "probing" else None,
-                       "peers": peers.get(h, {}).get("peers", 0), "seeders": peers.get(h, {}).get("seeders", 0), "ranges": merge_ranges(x["ranges"])}
+                       "peers": peers.get(h, {}).get("peers", 0), "seeders": peers.get(h, {}).get("seeders", 0),
+                       "pieces_needed": sum(e - b for b, e in merge_ranges(x["ranges"])), "down_rate": rx_rate,
+                       "last_received": last or None, "ranges": merge_ranges(x["ranges"])}
     with open(WANTED_FILE + ".tmp", "w") as f:
         json.dump({"torrents": [{"hash": h, "pieces": torrents[h]["ranges"]} for h in listening + probing]}, f)
     os.replace(WANTED_FILE + ".tmp", WANTED_FILE)
     listening_cost = sum(cost[h] for h in listening)
     changed = listening_cost != awake["listening_cost"] or calm != awake["calm"] or awake["drop_gentle"] or \
         set(need) != set(prev)
+    for h in list(rx):
+        if h not in need:
+            rx.pop(h)
     with plock:
         paths = {p for p, h, _ in reqs if h in need and p not in done}
     awake.update(torrents=torrents, paths=paths, listening_cost=listening_cost, rss=rss, over=over, calm=calm, at=now,
