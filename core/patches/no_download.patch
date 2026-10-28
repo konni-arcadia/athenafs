@@ -1,0 +1,137 @@
+diff --git a/fs/lazy.go b/fs/lazy.go
+index a3a6161..90974eb 100644
+--- a/fs/lazy.go
++++ b/fs/lazy.go
+@@ -83,6 +83,13 @@ func (l *Lazy) SleepIfIdle(idle time.Duration) bool {
+ 	return true
+ }
+ 
++// Current is the torrent in the client now, or nil while it sleeps.
++func (l *Lazy) Current() *torrent.Torrent {
++	l.mu.Lock()
++	defer l.mu.Unlock()
++	return l.t
++}
++
+ // Awake reports whether the torrent is in the client now.
+ func (l *Lazy) Awake() bool {
+ 	l.mu.Lock()
+diff --git a/fs/nodownload.go b/fs/nodownload.go
+new file mode 100644
+index 0000000..1d0f12e
+--- /dev/null
++++ b/fs/nodownload.go
+@@ -0,0 +1,17 @@
++package fs
++
++import "sync/atomic"
++
++// NoDownload is set while caching is stopped from the page ($DISTRIBYTED_NO_DOWNLOAD_FILE exists, see
++// torrent/nodownload.go): no torrent downloads data, and a read that needs data not in the cache fails after
++// NoDownloadTimeout seconds instead of the read timeout. Data already in the cache is read from the disk well within it.
++var NoDownload atomic.Bool
++
++const NoDownloadTimeout = 2
++
++func readTimeout(t int) int {
++	if NoDownload.Load() && t > NoDownloadTimeout {
++		return NoDownloadTimeout
++	}
++	return t
++}
+diff --git a/fs/torrent.go b/fs/torrent.go
+index 84507be..c55086d 100644
+--- a/fs/torrent.go
++++ b/fs/torrent.go
+@@ -177,7 +177,7 @@ func readAtLeast(r missinggo.ReadContexter, timeout int, buf []byte, min int) (n
+ 
+ 		ctx, cancel := context.WithCancel(context.Background())
+ 		timer := time.AfterFunc(
+-			time.Duration(timeout)*time.Second,
++			time.Duration(readTimeout(timeout))*time.Second,
+ 			func() {
+ 				cancel()
+ 			},
+@@ -248,7 +248,7 @@ func (d *torrentFile) Read(p []byte) (n int, err error) {
+ 	}
+ 	ctx, cancel := context.WithCancel(context.Background())
+ 	timer := time.AfterFunc(
+-		time.Duration(d.timeout)*time.Second,
++		time.Duration(readTimeout(d.timeout))*time.Second,
+ 		func() {
+ 			cancel()
+ 		},
+diff --git a/torrent/nodownload.go b/torrent/nodownload.go
+new file mode 100644
+index 0000000..a092291
+--- /dev/null
++++ b/torrent/nodownload.go
+@@ -0,0 +1,44 @@
++package torrent
++
++import (
++	"os"
++	"time"
++
++	"github.com/anacrolix/torrent"
++
++	"github.com/distribyted/distribyted/fs"
++)
++
++// Caching stopped from the page: while $DISTRIBYTED_NO_DOWNLOAD_FILE exists, no torrent downloads data. Checked every
++// 5 s: while stopped, every awake torrent is told again (a torrent woken meanwhile is told at its wake too); when it
++// stops, every awake torrent may download again. What is in the cache is still read and served.
++func (s *Service) noDownloadLoop(file string) {
++	for {
++		_, err := os.Stat(file)
++		on := err == nil
++		changed := on != fs.NoDownload.Load()
++		fs.NoDownload.Store(on)
++		if changed {
++			s.log.Info().Bool("stopped", on).Msg("caching stopped or resumed from the page")
++		}
++		if on || changed {
++			s.lazyMu.Lock()
++			ls := append([]*fs.Lazy(nil), s.lazies...)
++			s.lazyMu.Unlock()
++			for _, l := range ls {
++				if t := l.Current(); t != nil {
++					applyNoDownload(t)
++				}
++			}
++		}
++		time.Sleep(5 * time.Second)
++	}
++}
++
++func applyNoDownload(t *torrent.Torrent) {
++	if fs.NoDownload.Load() {
++		t.DisallowDataDownload()
++	} else {
++		t.AllowDataDownload()
++	}
++}
+diff --git a/torrent/service.go b/torrent/service.go
+index 8d409f9..5f0321d 100644
+--- a/torrent/service.go
++++ b/torrent/service.go
+@@ -69,6 +69,9 @@ func NewService(loaders []loader.Loader, db loader.LoaderAdder, stats *Stats, c
+ 		if f := os.Getenv("DISTRIBYTED_WANTED_FILE"); f != "" {
+ 			go s.wantedLoop(f)
+ 		}
++		if f := os.Getenv("DISTRIBYTED_NO_DOWNLOAD_FILE"); f != "" {
++			go s.noDownloadLoop(f)
++		}
+ 	}
+ 	return s
+ }
+@@ -174,6 +177,9 @@ func (s *Service) addLazyMI(r string, mi *metainfo.MetaInfo) error {
+ 		if err != nil {
+ 			return nil, err
+ 		}
++		if fs.NoDownload.Load() { // caching stopped from the page (see nodownload.go)
++			t.DisallowDataDownload()
++		}
+ 		s.s.ClearDormant(r, h)
+ 		s.s.Add(r, t)
+ 		s.log.Info().Str("hash", h).Str("route", r).Msg("torrent woken (a file was opened, or a health check)")

@@ -607,5 +607,15 @@ Open points (2026-10-22):
   `cached >= size` in `/api/usage` (none missing on either side), 0.02 s, 1.2 MB; the ETag gives 304; the two query
   forms and `/api/cached?folder=` all give 5,597 files; a 1.7 kB file cached by hand entered the list 15 s after it was
   complete (generation 1 -> 2).
+- **Stop caching (2026-10-28, the owner's request: "a button, very simple"):** while stopped, Distribyted downloads no
+  data (the BitTorrent library's own `DisallowDataDownload`, applied to awake torrents every 5 s and at each wake), and
+  the read timeout drops to 2 s so that a file that is not cached fails at once instead of holding a file browser for a
+  minute. The supervisor refuses Cache requests, pauses its queue, holds and probes no waiting torrent, and gives
+  gentleman mode no slot; the setting is in `settings.json` (it survives restarts). Checked: stop via the API -> flag
+  file, Distribyted logged it within 5 s, a Cache request refused, the list of held torrents empty; a cached file read
+  through the mount and over SMB with the same SHA-256 (0.08 s over SMB; 2.2 s for a first read, the torrent's wake);
+  an uncached 3 kB file refused in 0.36 s through the mount and at once over SMB (I/O error), cache unchanged; after
+  resume, the same file downloaded in 2 s and the waiting torrents were held again. A file opened still wakes its torrent
+  (memory), without downloading.
 - **Not wanted yet:** pinning files in the cache (protecting them from eviction).
 - **Patches upstream:** the patches are local; the crash and prefix fixes would be worth proposing to Distribyted.

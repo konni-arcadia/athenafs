@@ -11,6 +11,10 @@ with `.env.example`, then `sh scripts/up.sh` (it rebuilds).
 ## [Unreleased]
 
 ### Added
+- "Stop caching" (page header, `POST /api/caching`): nothing new is downloaded until resumed, also after a restart.
+  Distribyted patch `no_download`: every awake torrent has data downloads disallowed (and each new wake), and a read
+  needing data that is not cached fails within 2 s instead of the read timeout. Cache requests are refused; queued and
+  waiting ones pause; gentleman mode takes no slot. No restart; Distribyted checks every 5 s.
 - `GET /api/cached`: every file completely in the cache in one answer (no page cap; JSON, or NDJSON with
   `format=ndjson`), optionally under a folder, with a `generation` that is also the ETag (`If-None-Match` answers 304).
   Kept in memory and updated every 30 s from the pieces that arrived or left. Answers in hundredths of a second.

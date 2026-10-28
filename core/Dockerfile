@@ -88,6 +88,11 @@ RUN git apply /tmp/gentleman.patch
 # download them as soon as a peer that has them connects (no file open, no read blocked in FUSE meanwhile).
 COPY patches/wanted.patch /tmp/wanted.patch
 RUN git apply /tmp/wanted.patch
+# Local patch: "Stop caching" from the page. While $DISTRIBYTED_NO_DOWNLOAD_FILE exists (written by admin.py), no torrent
+# downloads data (awake ones are told every 5 s, a torrent is told at its wake) and a read needing data that is not in
+# the cache fails after 2 s instead of the read timeout; what is cached is still served.
+COPY patches/no_download.patch /tmp/no_download.patch
+RUN git apply /tmp/no_download.patch
 # Local patch: files of $DISTRIBYTED_ROOT_FILES are served at the root of the mount (admin.py puts links to its page there).
 COPY patches/root_files.go /src/fs/root_files.go
 RUN sed -i 's|\treturn &ContainerFs{s: s}, nil|\taddRootFiles(s)\n\treturn \&ContainerFs{s: s}, nil|' fs/container.go \

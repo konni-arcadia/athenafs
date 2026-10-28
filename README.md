@@ -108,6 +108,9 @@ The cache cap is set on the page (fixed size, or a share of the disk to keep fre
   **Remove, keep data**.
 - **Cache**: what is stored per torrent as a tree, with **Erase** on a file, a folder, a torrent or everything (a piece
   shared with a file that was not chosen is kept, and the page says so).
+- **Stop caching** (header): nothing new is downloaded until you resume, also after a restart. What is in the cache
+  stays available over SMB and the API; a file that is not cached fails at once instead of downloading; Cache requests
+  are refused, queued and waiting ones pause and resume afterwards; gentleman mode takes no slot. No restart.
 - **Settings**: cache cap; gentleman mode (slots, space, upload cap); memory for the torrents kept awake and the ceiling
   of Distribyted's memory (applied without restart).
 - Adding, removing, renaming and erasing restart the core (a few seconds): the share is unavailable meanwhile and reads in
@@ -130,6 +133,7 @@ JSON over HTTP, documented on the server at `/api/docs` (and `/api/openapi.json`
   `POST /api/requests/clear` (forgets the finished ones). Search and file results carry their request.
   `GET /api/waiting`: the torrents kept awake or probed for them, the memory budget, the ceiling, and Distribyted's memory
   over the last 24 h.
+- Caching: `POST /api/caching` (`stopped=true|false`); the state is `caching_stopped` in `GET /api/status`.
 - Actions: `POST /api/prefetch` (read into the cache; `path`, or `q` with `sort` and `status`), `POST /api/prefetch/cancel`, `POST /api/erase` (a file, folder or
   torrent).
 

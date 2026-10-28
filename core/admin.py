@@ -384,6 +384,7 @@ def load_settings():
          # Distribyted's real memory above which they are put back to sleep
          "awake_mem_mb": int(env_num("ATHENAFS_AWAKE_MEMORY_MB", 2000)),
          "memory_ceiling_mb": int(env_num("ATHENAFS_MEMORY_CEILING_MB", 8000)),
+         "caching_stopped": False,   # "Stop caching" on the page: nothing new is downloaded until resumed
          "upload_kbps": int(env_num("ATHENAFS_UPLOAD_LIMIT_KBPS", 1000))}
     try:
         d.update(json.load(open(SETTINGS)))
@@ -519,12 +520,14 @@ def start():
         print("ready views:", e)
     generate_config(load_sources())
     st = load_settings()
+    write_no_download(st)
     env = dict(os.environ,
                DISTRIBYTED_UPLOAD_LIMIT=str(int(st["upload_kbps"]) * 1000),
                DISTRIBYTED_GENTLEMAN_FILE=GENTLEMAN_FILE,
                DISTRIBYTED_GENTLEMAN_SPACE=str(int(gentle_space_bytes(st))),
                DISTRIBYTED_GENTLEMAN_CACHE=GENTLEMAN_CACHE,
                DISTRIBYTED_WANTED_FILE=WANTED_FILE,
+               DISTRIBYTED_NO_DOWNLOAD_FILE=NO_DOWNLOAD_FILE,
                # Go's soft memory limit: near the ceiling the garbage collector runs more often and returns memory to the
                # system, so the ceiling (see plan_waiting) acts on garbage before any torrent is put to sleep
                GOMEMLIMIT=f"{int(st['memory_ceiling_mb']) * 1000 // 1024 * 1000 // 1024}MiB")
@@ -966,7 +969,7 @@ border-left:3px solid var(--warn);border-radius:8px;padding:10px 14px;box-shadow
 .secbox ul{{margin:0 0 8px;padding-left:18px}}.secbox li{{margin:4px 0}}.brk{{word-break:break-word}}#sr td.small{{word-break:break-word}}#sr td button{{padding:1px 8px;font-size:12px}}
 </style>
 <div class=page>
-<header><h1>athenafs</h1><span id=pill class="pill {pillcls}">{state}</span><span id=wpill>{waitpill}</span>{secwarn}</header>
+<header><h1>athenafs</h1><span id=pill class="pill {pillcls}">{state}</span><span id=wpill>{waitpill}</span>{secwarn}<span id=cpill>{cachepill}</span></header>
 <section class=card><h2>Add torrents</h2>
 <form class=add method=post action=/add>
   <textarea class=l name=link rows=2 placeholder="magnet:?xt=urn:btih:…  or  https://…/file.torrent&#10;several: one per line" required></textarea>
@@ -1180,6 +1183,7 @@ setInterval(async()=>{{try{{
   document.getElementById('m').replaceWith(n);
   const p=d.getElementById('pill'); if(p)document.getElementById('pill').replaceWith(p);
   const wp=d.getElementById('wpill'); if(wp)document.getElementById('wpill').replaceWith(wp);
+  const cp=d.getElementById('cpill'); if(cp&&!document.querySelector('#cpill [data-armed]'))document.getElementById('cpill').replaceWith(cp);
 }}catch(e){{}}}},5000)
 </script>"""
 
@@ -1526,6 +1530,7 @@ def render(s=None):
                      f"other data {mb(other)} · cache {mb(s['total_cache'])} · free {mb(s['disk_free'])}")
                + "") if s["disk_total"] else ""
     return PAGE.format(capform=capform, act=act, cachepie=cachepie, diskpie=diskpie, secwarn=secwarn, waitpill=waitpill,
+                       cachepill=caching_pill(),
                        ncached=sum(1 for i in s["items"] if i["cache"]), down=rate(a["down"]), up=rate(a["up"]), dfree=mb(s["disk_free"]), dtotal=mb(s["disk_total"]), dmax=mb(s["max_cap_mb"] * 1e6),
                        state=html.escape(s["state"]), pillcls="ok" if s["state"] == "running" else "busy",
                        cache=mb(s["total_cache"]), cap=cap, cachepct=pct, msg=msg, rows=rows, sources=srows, unknown=unk,
@@ -1579,6 +1584,7 @@ def api_status():
             "transfer": {"down": a["down"], "up": a["up"]},
             "prefetch": {"queued": a["prefetch"]["queued"], "active": len(a["prefetch"]["active"]),
                          "done": a["prefetch"]["done"], "failed": a["prefetch"]["failed"]},
+            "caching_stopped": bool(load_settings().get("caching_stopped")),
             "smb": locations("", True), "warnings": WARNINGS}
 
 
@@ -1736,6 +1742,8 @@ API_DOC = [
     ("POST", "/api/folder-visibility", "folder, hidden (true or false)",
      "Hide a folder from the share or show it again (Samba only, a few seconds, no restart). A hidden folder stays in the catalogue; with its ready view on, the share shows only what is ready."),
     ("GET", "/api", "", "Full status as used by the page (sources, cache tree, settings)."),
+    ("POST", "/api/caching", "stopped (true or false)",
+     "Stop caching (true): nothing new is downloaded until resumed, also after a restart. What is in the cache stays available over SMB; a read needing data that is not cached fails within 2 s; Cache requests are refused; queued and waiting ones pause; gentleman mode takes no slot. false resumes. No restart. The state is caching_stopped in /api/status."),
     ("POST", "/api/prefetch", "path (repeatable) or q (a search, with sort and status as in /api/search)", "Read files into the cache ahead of time, in that order. Refused when larger than 90 % of the cache cap."),
     ("POST", "/api/prefetch/cancel", "", "Empty the prefetch queue and stop the reads in progress."),
     ("POST", "/api/requests/clear", "", "Forget finished Cache requests (done, cancelled, failed); queued, running and waiting ones stay."),
@@ -1890,12 +1898,14 @@ class H(http.server.BaseHTTPRequestHandler):
             self.send_response(413); self.send_header("Content-Length", "0"); self.end_headers(); return
         raw = self.rfile.read(n)
         go = lambda fn, *a: threading.Thread(target=fn, args=a, daemon=True).start()
-        if self.path in ("/api/prefetch", "/api/prefetch/cancel", "/api/requests/retry", "/api/requests/cancel", "/api/requests/clear", "/api/erase", "/api/ready-view", "/api/folder-visibility",
+        if self.path in ("/api/caching", "/api/prefetch", "/api/prefetch/cancel", "/api/requests/retry", "/api/requests/cancel", "/api/requests/clear", "/api/erase", "/api/ready-view", "/api/folder-visibility",
                          "/api/folder-remove"):
             q = body_params(raw, self.headers.get("Content-Type"))
             one = lambda k: str((q.get(k) or [""])[0])
             yes = lambda k: one(k).lower() in ("1", "true", "on", "yes")
-            if self.path == "/api/ready-view":
+            if self.path == "/api/caching":
+                res = set_caching(yes("stopped")) if one("stopped") else {"error": "give stopped=true or stopped=false"}
+            elif self.path == "/api/ready-view":
                 res = set_ready_view(one("folder"), yes("on"), one("name"))
             elif self.path == "/api/folder-visibility":
                 res = set_hidden(one("folder"), yes("hidden"))
@@ -1941,6 +1951,8 @@ class H(http.server.BaseHTTPRequestHandler):
                 go(erase, one("h"), one("p"))
             elif self.path == "/gentleman":
                 go(apply_gentleman, one("on") == "1", one("slots") or "0", one("pct") or "0", one("upload") or "0")
+            elif self.path == "/caching":
+                set_caching(one("stopped") == "1")
             elif self.path == "/awake":
                 apply_awake(one("mem"), one("ceiling"))
             elif self.path == "/settings":
@@ -2383,6 +2395,9 @@ def prefetch_add(q="", paths=(), sort="", status=""):
     before the last are read."""
     if sort not in SEARCH_SORTS or status not in SEARCH_STATUS:
         return {"error": "sort: name, largest or smallest; status: cached or not cached"}
+    if caching_stopped():
+        return {"error": "caching is stopped (Resume caching on the page, or POST /api/caching stopped=false): nothing queued",
+                "caching_stopped": True}
     c = db()
     try:
         if q:
@@ -2464,7 +2479,8 @@ def prefetch_retry(paths=None):
 def prefetch_worker():
     while True:
         with plock:
-            path = prefetch["queue"].popleft() if prefetch["queue"] and state["state"] == "running" else None
+            path = (prefetch["queue"].popleft() if prefetch["queue"] and state["state"] == "running"
+                    and not load_settings().get("caching_stopped") else None)   # stopped: the queue waits
             if path:
                 size = prefetch["queued"].pop(path, 0)
                 job = prefetch["active"][path] = {"path": path, "size": size, "read": 0, "cancel": False,
@@ -2707,16 +2723,17 @@ def plan_waiting(log=False):
             was_listening.discard(h)
             print(f"memory: Distribyted uses {mb(rss)} (ceiling {mb(ceiling)}): {h[:8]} stops listening, probed instead")
         awake["last_shed"] = now
+    stopped = bool(st.get("caching_stopped"))   # caching stopped: no torrent is held or probed, requests keep waiting
     listening, left, room = [], budget, 0.9 * ceiling - rss
     for h in sorted(need, key=lambda h: (h not in was_listening, cost[h], need[h]["since"])):
-        if cost[h] > left:
+        if cost[h] > left or stopped:
             continue
         if h in was_listening:
             listening.append(h); left -= cost[h]
         elif calm and cost[h] <= room:
             listening.append(h); left -= cost[h]; room -= cost[h]
     # a probe runs until its last_probe time (kept in the table, so a restart does not cut it short)
-    probing = [h for h in need if h not in listening and probes.get(h, (0, 0, 0))[2] > now][:PROBES_AT_ONCE]
+    probing = [] if stopped else [h for h in need if h not in listening and probes.get(h, (0, 0, 0))[2] > now][:PROBES_AT_ONCE]
     sw = swarm_info()
     newp = {}
     for h in sorted(need, key=lambda h: probes.get(h, (0, 0, 0))[1]):
@@ -2725,7 +2742,7 @@ def plan_waiting(log=False):
         n, nx, lp = probes.get(h, (0, need[h]["since"] + PROBE_STEPS[0], 0))
         hl, s_ = health.get(h) or {}, sw.get(h) or {}
         signal = (hl.get("seeders") and hl.get("checked", 0) > lp) or (s_.get("seeders") and s_.get("checked", 0) > lp)
-        if (now >= nx or signal) and len(probing) < PROBES_AT_ONCE and calm and cost[h] <= room:
+        if (now >= nx or signal) and len(probing) < PROBES_AT_ONCE and calm and cost[h] <= room and not stopped:
             probing.append(h); room -= cost[h]
             n += 1; lp = now + PROBE_WINDOW; nx = lp + PROBE_STEPS[min(n, len(PROBE_STEPS) - 1)]
             print(f"cache requests: probing {h[:8]} for {PROBE_WINDOW // 60} min ({'a seeder was reported' if signal else f'probe {n}'})")
@@ -3206,11 +3223,12 @@ def plan_gentleman_locked():
     for h in list(slots):   # leave the slot: enough seeders again, 24 h passed, or the torrent is gone
         x = sw.get(h, {})
         if (h not in known or x.get("seeders", 0) >= 3 or now - slots[h]["since"] > 86400 or not st["gentle_on"]
+                or st.get("caching_stopped")
                 or slots_over_memory(slots, st, h) or h in awake["torrents"] or h == awake["drop_gentle"]):
             slots.pop(h); released[h] = now
     for h in sorted(slots, key=lambda k: slots[k]["since"])[int(st["gentle_slots"]):]:   # the maximum was lowered:
         slots.pop(h); released[h] = now                                               # the most recent ones leave
-    if st["gentle_on"] and awake["calm"]:
+    if st["gentle_on"] and awake["calm"] and not st.get("caching_stopped"):
         cands = sorted((h for h, x in sw.items() if h in known and h not in slots and h not in released and h not in awake["torrents"]
                         and 1 <= x["seeders"] <= 2 and x["leechers"] >= 1),
                        key=lambda h: -sw[h]["leechers"] / sw[h]["seeders"])
@@ -3271,6 +3289,40 @@ def apply_gentleman(on, slots, pct, upload_kbps):
     exclusive(job)
 
 
+NO_DOWNLOAD_FILE = "/data/no-download"   # exists while caching is stopped: Distribyted then downloads nothing
+
+
+def caching_stopped():
+    return bool(load_settings().get("caching_stopped"))
+
+
+def write_no_download(st):
+    if st.get("caching_stopped"):
+        with open(NO_DOWNLOAD_FILE, "w") as f:
+            f.write("caching stopped from the page\n")
+    else:
+        try:
+            os.remove(NO_DOWNLOAD_FILE)
+        except FileNotFoundError:
+            pass
+
+
+def set_caching(stopped):
+    """Stop caching (nothing new is downloaded: reads of what is not cached fail quickly, Cache requests are refused,
+    queued and waiting ones pause, gentleman mode takes no slot) or resume it. No restart: Distribyted checks every 5 s."""
+    st = dict(load_settings(), caching_stopped=bool(stopped))
+    save_settings(st)
+    write_no_download(st)
+    waiter_wake.set()
+    try:
+        plan_gentleman()
+    except Exception as e:
+        print("gentleman:", e)
+    state["message"] = ("caching stopped: nothing new is downloaded; what is cached stays available" if stopped
+                        else "caching resumed")
+    return {"caching_stopped": bool(stopped)}
+
+
 def apply_awake(mem_mb, ceiling_mb):
     """Memory budget of the torrents kept awake and ceiling of Distribyted's memory: no restart, the waiter applies them."""
     try:
@@ -3299,6 +3351,17 @@ def memory_tile():
            f"gentleman mode {mb(gent)}, budget {mb(budget)}. Settings to change both.")
     return (f"<div class=\"tile pie\" title=\"{html.escape(why, quote=True)}\"><div><span>Memory</span><b>{mb(rss)}</b>"
             f"<span>{state_} · awake by choice {mb(wait + gent)} of {mb(budget)}</span></div>{pie}</div>")
+
+
+def caching_pill():
+    """Header: the Stop caching button, or, while stopped, a badge and Resume caching."""
+    form = '<form method=post action=/caching style="display:inline;margin-left:8px"><input type=hidden name=stopped value={v}>{b}</form>'
+    if caching_stopped():
+        return ('<span class="pill warn" title="Nothing new is downloaded: what is cached stays available over SMB, the rest fails '
+                'at once; Cache requests are refused, queued and waiting ones pause.">caching stopped</span>'
+                + form.format(v=0, b="<button class=primary>Resume caching</button>"))
+    return form.format(v=1, b='<button data-confirm="stop caching? Nothing new will be downloaded until you resume; what is cached '
+                             'stays available">Stop caching</button>')
 
 
 def request_badges():
