@@ -11,6 +11,8 @@ with `.env.example`, then `sh scripts/up.sh` (it rebuilds).
 ## [Unreleased]
 
 ### Added
+- A favicon (Athena's owl, as on the Athenian coins) on the page and `/api/docs`; a browser's `/favicon.ico` request now gets a 404 instead
+  of the whole page (about 2 MB).
 - "Stop caching" (page header, `POST /api/caching`): nothing new is downloaded until resumed, also after a restart.
   Distribyted patch `no_download`: every awake torrent has data downloads disallowed (and each new wake), and a read
   needing data that is not cached fails within 2 s instead of the read timeout. Cache requests are refused; queued and

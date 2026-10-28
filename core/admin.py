@@ -913,7 +913,28 @@ def mb(n):
     return f"{n / 1e6:,.0f} MB".replace(",", " ") if n < 1e9 else f"{n / 1e9:.2f} GB"
 
 
+# Athena's owl as on the Athenian tetradrachm (a silver coin, the owl, an olive sprig), readable at 16 px; fixed colours
+# (a tab icon does not follow the page's theme)
+FAVICON = b"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+<rect width="32" height="32" rx="7" fill="#1f2f4d"/>
+<circle cx="16" cy="16" r="14.2" fill="#d6dae1"/>
+<circle cx="16" cy="16" r="12.8" fill="none" stroke="#9199a5" stroke-width="1"/>
+<path d="M5.6 14 Q7.4 9.2 12.2 6.6" fill="none" stroke="#4f6b2c" stroke-width="1.1" stroke-linecap="round"/>
+<path d="M6.3 12 Q3.9 11.3 4 8.8 Q6.5 9.4 6.3 12 Z" fill="#6f9a37"/>
+<path d="M8.5 9.6 Q7.1 7.3 8.6 5.2 Q10.2 7.4 8.5 9.6 Z" fill="#6f9a37"/>
+<path d="M10.9 7.5 Q11.6 5 14.1 4.8 Q13.3 7.3 10.9 7.5 Z" fill="#6f9a37"/>
+<g transform="translate(2.2 1.6) scale(0.9)">
+<path d="M9 9.5 L10.5 5.5 L13 9 Z M23 9.5 L21.5 5.5 L19 9 Z" fill="#5b636e"/>
+<path d="M8 14 C8 7.5 24 7.5 24 14 V20 C24 25 19.5 27 16 27 C12.5 27 8 25 8 20 Z" fill="#7b8491"/>
+<circle cx="12.2" cy="14.2" r="3.6" fill="#f4f5f7"/><circle cx="19.8" cy="14.2" r="3.6" fill="#f4f5f7"/>
+<circle cx="12.5" cy="14.5" r="1.8" fill="#1b1d21"/><circle cx="19.5" cy="14.5" r="1.8" fill="#1b1d21"/>
+<path d="M14.6 18 L17.4 18 L16 21 Z" fill="#3e444d"/>
+</g>
+</svg>"""
+FAVICON_V = hashlib.sha1(FAVICON).hexdigest()[:8]   # in the link: a new icon is fetched at once despite the cache
+
 PAGE = """<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
+<link rel=icon href="/favicon.svg?v={favicon_v}" type="image/svg+xml">
 <title>athenafs</title>
 <style>
 :root{{--bg:#f6f7f9;--card:#fff;--fg:#1b1d21;--mut:#6b7079;--line:#e3e5ea;--acc:#2f5bd3;--warn:#b3261e;--ok:#1e7d43;--chip:#eef1f6}}
@@ -1530,7 +1551,7 @@ def render(s=None):
                      f"other data {mb(other)} · cache {mb(s['total_cache'])} · free {mb(s['disk_free'])}")
                + "") if s["disk_total"] else ""
     return PAGE.format(capform=capform, act=act, cachepie=cachepie, diskpie=diskpie, secwarn=secwarn, waitpill=waitpill,
-                       cachepill=caching_pill(),
+                       cachepill=caching_pill(), favicon_v=FAVICON_V,
                        ncached=sum(1 for i in s["items"] if i["cache"]), down=rate(a["down"]), up=rate(a["up"]), dfree=mb(s["disk_free"]), dtotal=mb(s["disk_total"]), dmax=mb(s["max_cap_mb"] * 1e6),
                        state=html.escape(s["state"]), pillcls="ok" if s["state"] == "running" else "busy",
                        cache=mb(s["total_cache"]), cap=cap, cachepct=pct, msg=msg, rows=rows, sources=srows, unknown=unk,
@@ -1759,7 +1780,7 @@ def api_docs_html():
     rows = "".join(f"<tr><td><code>{m}</code></td><td><code>{html.escape(p)}</code></td><td>{html.escape(a)}</td><td>{html.escape(d)}</td></tr>"
                    for m, p, a, d in API_DOC)
     host = html.escape(PAGE_URL.rstrip("/") or "http://localhost:8080")
-    return f"""<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>athenafs API</title>
+    return f"""<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><link rel=icon href="/favicon.svg?v={FAVICON_V}" type="image/svg+xml"><title>athenafs API</title>
 <style>:root{{--bg:#f6f7f9;--fg:#1b1d21;--mut:#6b7079;--line:#e3e5ea;--card:#fff}}@media (prefers-color-scheme:dark){{:root{{--bg:#111315;--fg:#e6e7e9;--mut:#9aa0a8;--line:#2c3035;--card:#1a1d20}}}}
 body{{background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,sans-serif;margin:0;padding:16px}}.page{{max-width:1040px;margin:auto}}
 table{{width:100%;border-collapse:collapse;background:var(--card)}}td,th{{text-align:left;padding:8px;border-bottom:1px solid var(--line);vertical-align:top}}
@@ -1830,6 +1851,12 @@ class H(http.server.BaseHTTPRequestHandler):
         res, body, ct = None, None, "application/json"
         if u.path == "/api/cached":
             return self.send_cached(one("folder"), one("format", "json"))
+        if u.path in ("/favicon.svg", "/favicon.ico"):   # .ico: a browser's default guess, answered without the page
+            if u.path == "/favicon.ico":
+                self.send_response(404); self.send_header("Content-Length", "0"); self.end_headers(); return
+            self.send_response(200); self.send_header("Content-Type", "image/svg+xml")
+            self.send_header("Cache-Control", "max-age=86400"); self.send_header("Content-Length", str(len(FAVICON)))
+            self.end_headers(); self.wfile.write(FAVICON); return
         try:
             if u.path == "/api":
                 body = served["json"] or json.dumps(snapshot()).encode()
