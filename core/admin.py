@@ -11,7 +11,7 @@ The torrents served are kept in /data/sources.json; the Distribyted configuratio
 configuration (/config/config.yaml, everything above `routes:`) plus those sources.
 """
 import base64, bisect, collections, functools, math, struct, hashlib, sqlite3, hmac, html, http.server, ipaddress, json, os, re, secrets, shutil, signal, socket, subprocess
-import threading, time, urllib.error, urllib.parse, urllib.request
+import mimetypes, threading, time, urllib.error, urllib.parse, urllib.request
 
 CFG = os.environ.get("DISTRIBYTED_CONFIG", "/config/config.yaml")
 DATA = "/data/metadata"
@@ -1079,7 +1079,8 @@ function row(f){{
   const btn=['cached','queued','caching','waiting'].includes(f.status)?'':'<button class=cache data-p="'+esc(f.path)+'">'+(f.status=='failed'?'Retry':'Cache')+'</button>';
   const rq=!f.request?'':f.status=='failed'?'<div class="small warn">cache request failed '+ago(f.request.updated)+': '+esc(f.request.error)+'</div>'
     :f.status=='waiting'?'<div class="small mut">waiting for a seeder for '+dur(Date.now()/1000-f.request.waiting_since)+' (see Cache requests)</div>':'';
-  const lk=f.smb_url?' <span class=mut>· <a href="'+esc(f.smb_url)+'" title="'+esc(f.smb_url)+'">open</a> · <a href=# data-copy="'+esc(f.unc_path)+'" title="'+esc(f.unc_path)+'">copy \\\\\\\\ path</a></span>':' <span class=mut>· hidden from the share</span>';
+  const dl=f.status=='cached'?' · <a href="/api/download?path='+encodeURIComponent(f.path)+'">download</a>':'';
+  const lk=f.smb_url?' <span class=mut>· <a href="'+esc(f.smb_url)+'" title="'+esc(f.smb_url)+'">open</a>'+dl+' · <a href=# data-copy="'+esc(f.unc_path)+'" title="'+esc(f.unc_path)+'">copy \\\\\\\\ path</a></span>':' <span class=mut>· hidden from the share'+dl+'</span>';
   return '<tr><td class=small>'+pathHtml(f.path)+lk+hl+rq+'</td><td class=n>'+sz(f.size)+'</td><td class=n><span class="pill '+(badge[f.status]||'')+'">'+esc(label)+'</span></td><td class=n>'+btn+'</td></tr>';
 }}
 async function runSearch(more,refresh){{  // refresh: the rows already shown again, to follow their status
@@ -1745,6 +1746,8 @@ API_DOC = [
     ("GET", "/api/torrents/{hash}", "", "One torrent, with its largest cached files."),
     ("GET", "/api/search", "q (words, all must match; or folder:path), sort (name, largest or smallest; default: torrent order), status (cached or not cached; default: all), limit (≤ 500), offset",
      "Files whose path contains every word. Each result: size, status (cached, partial, not cached, downloading, queued, caching, waiting, failed), cached bytes, its Cache request if any, health, smb_url, unc_path. status=cached draws from the list of complete files (see /api/cached): complete, never capped. status=not cached looks at the first 10,000 matches only (total_capped says so). For the whole list of cached files, use /api/cached."),
+    ("GET", "/api/download", "path (as in the share)",
+     "The file, if it is completely in the cache: read from the cache's own piece files, so it never wakes a torrent nor downloads anything. Range requests supported (one range); Content-Disposition gives its name. Otherwise 409 with its state (status, cached bytes, Cache request, caching_stopped): ask for it with POST /api/prefetch, then retry. HEAD gives the same answer without the data. 404 for a path not in the share."),
     ("GET", "/api/cached", "folder (optional: only under this share path), format (json or ndjson)",
      "Every file completely in the cache, in one answer with no page cap, sorted by path: path, size, torrent hash, folder, hidden. Kept up to date every 30 s. Fields generation (grows when the list changes; also the ETag: send If-None-Match to get 304 Not Modified when nothing changed), changed and checked (times), total, total_size. ndjson: a first line with those fields, then one line per file. 503 with Retry-After for a few seconds after a start."),
     ("GET", "/api/file", "path (as in the share)", "One file: status, cached bytes, its Cache request if any (state, error, attempts), torrent, health, smb_url, unc_path."),
@@ -1851,6 +1854,8 @@ class H(http.server.BaseHTTPRequestHandler):
         res, body, ct = None, None, "application/json"
         if u.path == "/api/cached":
             return self.send_cached(one("folder"), one("format", "json"))
+        if u.path == "/api/download":
+            return self.send_download(one("path"))
         if u.path in ("/favicon.svg", "/favicon.ico"):   # .ico: a browser's default guess, answered without the page
             if u.path == "/favicon.ico":
                 self.send_response(404); self.send_header("Content-Length", "0"); self.end_headers(); return
@@ -1916,6 +1921,89 @@ class H(http.server.BaseHTTPRequestHandler):
             self.send_response(200); self.send_header("ETag", etag)
         self.send_header("Content-Type", "application/x-ndjson" if fmt == "ndjson" and complete["ready"] else "application/json")
         self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+
+    def do_HEAD(self):
+        """HEAD /api/download only: is the file ready, its size and name, without the data."""
+        if not self.authorized():
+            return
+        u = urllib.parse.urlparse(self.path)
+        if u.path != "/api/download":
+            self.send_response(405); self.send_header("Content-Length", "0"); self.end_headers(); return
+        q = urllib.parse.parse_qs(u.query)
+        self.send_download((q.get("path") or [""])[0], head=True)
+
+    def send_json(self, code, res):
+        body = json.dumps(res).encode()
+        self.send_response(code); self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body))); self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
+
+    def send_download(self, path, head=False):
+        """A file completely in the cache, read straight from the cache's piece files: never wakes a torrent, never
+        downloads. Anything else gets 409 with the file's state (ask for it with POST /api/prefetch). Range supported."""
+        path = path.strip("/")
+        c = db()
+        try:
+            r = c.execute("SELECT hash, size, off FROM files WHERE path = ?", (path,)).fetchone()
+        finally:
+            c.close()
+        t = torrent_pieces().get(r[0]) if r else None
+        if not r or not t:
+            return self.send_json(404, {"error": "no such file in the share (folders: GET /api/search?q=folder:<path>)"})
+        h, size, off = r
+        pl = t["pl"]
+        first, last = off // pl, (off + max(size, 1) - 1) // pl
+        cached = set(cache_files())
+        if size and not all(piece(t, i) in cached for i in range(first, last + 1)):
+            info = api_file(path)
+            return self.send_json(409, {"error": "not completely in the cache: nothing was started",
+                                        "path": path, "size": size, "status": info.get("status"), "cached": info.get("cached"),
+                                        "request": info.get("request"), "health_text": info.get("health_text"),
+                                        "caching_stopped": caching_stopped(),
+                                        "cache_it": "POST /api/prefetch with path=<this path> (header X-Athenafs: 1), then retry"})
+        start, end, code = 0, size - 1, 200
+        rng = self.headers.get("Range", "")
+        m = re.fullmatch(r"bytes=(\d*)-(\d*)", rng.strip())
+        if rng and m and (m.group(1) or m.group(2)):   # one range; several ranges are answered with the whole file
+            if m.group(1):
+                start = int(m.group(1)); end = min(int(m.group(2)), size - 1) if m.group(2) else size - 1
+            else:
+                start = max(0, size - int(m.group(2)))
+            if start > end or start >= size:
+                self.send_response(416); self.send_header("Content-Range", f"bytes */{size}")
+                self.send_header("Content-Length", "0"); self.end_headers(); return
+            code = 206
+        name = path.rsplit("/", 1)[-1]
+        self.send_response(code)
+        self.send_header("Content-Type", mimetypes.guess_type(name)[0] or "application/octet-stream")
+        self.send_header("Content-Disposition", "attachment; filename*=UTF-8''" + urllib.parse.quote(name))
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Length", str(max(0, end - start + 1)))
+        if code == 206:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        self.end_headers()
+        if head or size == 0:
+            return
+        pos = off + start   # position in the torrent
+        stop = off + end + 1
+        try:
+            while pos < stop:
+                i = pos // pl
+                try:   # a piece evicted meanwhile: the transfer stops short (never fetched from peers)
+                    with open(os.path.join(CACHE, piece(t, i)), "rb") as f:
+                        f.seek(pos - i * pl)
+                        data = f.read(min(stop, (i + 1) * pl) - pos)
+                except OSError:
+                    print(f"download: piece {i} of {h[:8]} left the cache during {path}: transfer cut")
+                    return
+                if not data:
+                    return
+                for k in range(0, len(data), 1 << 20):
+                    self.wfile.write(data[k:k + (1 << 20)])
+                pos += len(data)
+        except (BrokenPipeError, ConnectionResetError):
+            pass   # the client went away
 
     def do_POST(self):
         if not self.authorized():

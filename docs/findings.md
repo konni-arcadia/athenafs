@@ -617,5 +617,12 @@ Open points (2026-10-22):
   an uncached 3 kB file refused in 0.36 s through the mount and at once over SMB (I/O error), cache unchanged; after
   resume, the same file downloaded in 2 s and the waiting torrents were held again. A file opened still wakes its torrent
   (memory), without downloading.
+- **Download over HTTP (2026-11-07, the owner's design):** `GET /api/download` serves only files completely in the cache
+  and starts nothing otherwise (409 with the file's state; asking for the cache stays `POST /api/prefetch`, protected
+  against cross-site requests), so this GET stays read-only. It reads the cache's piece files directly (raw piece data,
+  named by piece hash: checked byte for byte against a read through the mount) instead of the mount, so it cannot wake a
+  torrent (no memory cost) nor trigger a download; a piece evicted during a transfer cuts it short. Checked: full file,
+  ranges (`100-199`, `-50`, out of range 416), HEAD, unknown path 404; an uncached file 409 with no torrent woken and no
+  byte added to the cache; 1.3 GB sent in 2 s (about 660 MB/s) with the same SHA-256 as through the mount.
 - **Not wanted yet:** pinning files in the cache (protecting them from eviction).
 - **Patches upstream:** the patches are local; the crash and prefix fixes would be worth proposing to Distribyted.

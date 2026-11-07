@@ -11,6 +11,10 @@ with `.env.example`, then `sh scripts/up.sh` (it rebuilds).
 ## [Unreleased]
 
 ### Added
+- `GET /api/download?path=…`: a file completely in the cache over HTTP, read straight from the cache's piece files, so
+  it never wakes a torrent nor downloads anything; Range requests and `HEAD`. A file that is not complete gets `409`
+  with its state (the client decides whether to ask for it with `POST /api/prefetch`). A "download" link on cached
+  search results.
 - A favicon (Athena's owl, as on the Athenian coins) on the page and `/api/docs`; a browser's `/favicon.ico` request now gets a 404 instead
   of the whole page (about 2 MB).
 - "Stop caching" (page header, `POST /api/caching`): nothing new is downloaded until resumed, also after a restart.

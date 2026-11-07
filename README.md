@@ -90,7 +90,7 @@ The cache cap is set on the page (fixed size, or a share of the disk to keep fre
   caching, waiting, failed) and the last health check of its torrent. Click a folder in a result to list everything under it
   (`folder:path`). Order (as in the torrents, name, largest or smallest first) and filter (all, cached, not cached).
   **Cache** reads a file, or every result, into the cache ahead of time ("Cache all" follows the order and the filter);
-  the rows follow their state while files are queued or being read.
+  the rows follow their state while files are queued or being read. A cached file has a **download** link (HTTP).
 - **Largest in the cache**, by file, folder or torrent, with **Erase** and links to open the item over SMB.
 - **Tiles**: cache, disk, transfer, torrents, and memory: Distribyted's memory against its ceiling, and the torrents kept
   awake by choice against their budget.
@@ -121,6 +121,9 @@ JSON over HTTP, documented on the server at `/api/docs` (and `/api/openapi.json`
 - Status: `GET /api/status`, `GET /api/torrents`, `GET /api/torrents/{hash}`, `GET /api/activity`.
 - Files: `GET /api/search?q=words` (or `q=folder:path`; `sort=name|largest|smallest`, `status=cached|not cached`) and `GET /api/file?path=…` give each file's state, its torrent's
   health, and where to open it: `smb_url` (Finder) and `unc_path` (Windows).
+- Download: `GET /api/download?path=…` sends a file that is completely in the cache, read from the cache's own piece
+  files: it never wakes a torrent nor downloads anything (Range supported, `HEAD` too). A file that is not complete
+  gets `409` with its state; ask for it with `POST /api/prefetch`, then retry.
 - Cached files: `GET /api/cached` (optional `folder`, `format=ndjson`) lists every file completely in the cache in one
   answer, kept up to date every 30 s, with a `generation` that is also its ETag (`If-None-Match` answers 304 when nothing
   changed). In the search, `status=cached` draws from the same list.
