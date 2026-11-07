@@ -10,26 +10,29 @@ with `.env.example`, then `sh scripts/up.sh` (it rebuilds).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-07
+
 ### Added
 - `GET /api/download?path=…`: a file completely in the cache over HTTP, read straight from the cache's piece files, so
   it never wakes a torrent nor downloads anything; Range requests and `HEAD`. A file that is not complete gets `409`
   with its state (the client decides whether to ask for it with `POST /api/prefetch`). A "download" link on cached
-  search results.
-- A favicon (Athena's owl, as on the Athenian coins) on the page and `/api/docs`; a browser's `/favicon.ico` request now gets a 404 instead
-  of the whole page (about 2 MB).
+  search results (5f20707).
+- A favicon (Athena's owl, as on the Athenian coins) on the page and `/api/docs`; a browser's `/favicon.ico` request
+  now gets a 404 instead of the whole page (about 2 MB) (d425cf0).
 - "Stop caching" (page header, `POST /api/caching`): nothing new is downloaded until resumed, also after a restart.
   Distribyted patch `no_download`: every awake torrent has data downloads disallowed (and each new wake), and a read
   needing data that is not cached fails within 2 s instead of the read timeout. Cache requests are refused; queued and
-  waiting ones pause; gentleman mode takes no slot. No restart; Distribyted checks every 5 s.
+  waiting ones pause; gentleman mode takes no slot. No restart; Distribyted checks every 5 s (c9e6d07).
 - `GET /api/cached`: every file completely in the cache in one answer (no page cap; JSON, or NDJSON with
   `format=ndjson`), optionally under a folder, with a `generation` that is also the ETag (`If-None-Match` answers 304).
-  Kept in memory and updated every 30 s from the pieces that arrived or left. Answers in hundredths of a second.
+  Kept in memory and updated every 30 s from the pieces that arrived or left. Answers in hundredths of a second
+  (43d453f).
 - Waiting requests whose torrent is receiving data say so in Cache requests (rate, pieces here) and in Activity (04cb119).
 
 ### Fixed
 - `/api/search` with `status=cached` gave a different part of the answer for each form of the same query (it looked at
   the first 10,000 matches only, then kept the cached ones): it now draws from the list of complete files, complete and
-  never capped. `status=not cached` still looks at the first 10,000 matches, as `total_capped` says.
+  never capped. `status=not cached` still looks at the first 10,000 matches, as `total_capped` says (43d453f).
 
 ## [0.2.0] - 2026-10-23
 
